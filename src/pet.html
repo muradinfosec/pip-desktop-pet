@@ -24,6 +24,21 @@
   #bubble.heard { font-style: italic; color: #3A5FB0; }
   #bubble.pop { transform: scale(1.07); }
   #stage { display: block; width: 240px; height: 200px; margin-top: -58px; overflow: visible; }
+  /* Near the top of the screen the bubble goes under Pip instead. */
+  body.below #wrap { flex-direction: column-reverse; justify-content: flex-end; }
+  body.below #stage { margin-top: 0; margin-bottom: -16px; }
+  body.below #bubble { margin-bottom: 0; }
+  body.below #bubble::after { bottom: auto; top: -6px; border-top: 0; border-bottom: 6px solid rgba(255,255,255,0.96); }
+  /* Asking before Pip does something that changes your computer or reaches out. */
+  #bubble.ask { max-height: none; text-align: left; font-style: normal; color: #2B2422; }
+  #bubble .q { font-weight: 600; margin-bottom: 4px; }
+  #bubble code { display: block; font: 11.5px/1.35 ui-monospace, Menlo, monospace; background: #F3EDE7; border-radius: 6px;
+    padding: 5px 7px; margin: 0 0 7px; white-space: pre-wrap; word-break: break-word; max-height: 64px; overflow: hidden; }
+  #bubble .btns { display: flex; gap: 6px; justify-content: flex-end; }
+  #bubble button { font: 600 12px -apple-system, sans-serif; border: 0; border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  #bubble button.no { background: #EEE8E2; color: #2B2422; }
+  #bubble button.yes { background: #E8875A; color: #fff; }
+  #bubble .hint { font-size: 11px; color: #8C8C99; margin-top: 5px; }
   #stage text { font-family: -apple-system, sans-serif; text-anchor: middle; }
 </style></head>
 <body><div id="wrap"><div id="bubble">Hi, I'm Pip! Press ⌃⌥P to talk to me.</div>
@@ -189,8 +204,9 @@ let t = 0                       // seconds since the page loaded
 const GREETING = "Hi, I'm Pip! Press ⌃⌥P to talk to me."
 let M = { mood: 'done', activity: '', line: GREETING }
 let moodAt = -30, lineAt = 0, replyId = null
-let local = null                // 'listening' | 'asking' | 'talking': the app's own voice chat
-let localLine = '', localKind = ''
+let local = null                // 'listening' | 'asking' | 'doing' | 'approval' | 'talking': the app's own voice chat
+let localLine = '', localKind = '', localActivity = ''
+let approval = null             // { id, question, detail } while Pip waits for your OK
 let patUntil = 0, pats = [], isHeld = false, isHover = false
 let isSpeaking = false, talkUntil = 0
 let pointer = { x: 0, y: 200, at: -99 }
@@ -336,6 +352,8 @@ function emotion() {
   if (t < patUntil) return 'love'
   if (local === 'listening') return 'listening'
   if (local === 'asking') return 'thinking'
+  if (local === 'approval') return 'curious'
+  if (local === 'doing') return TOOL[localActivity] === 'lens' ? 'curious' : localActivity === 'helper' ? 'happy' : 'focused'
   if (local === 'talking' || M.mood === 'talking') return 'talking'
   const age = t - moodAt
   switch (M.mood) {
@@ -362,7 +380,8 @@ function pose(dt) {
   const emo = emotion()
   const T = Object.assign({}, BASE, EMO[emo])
   const A = {}
-  const tool = M.mood === 'working' && !local && !isHeld && t >= patUntil ? TOOL[M.activity] : null
+  const busy = local === 'doing' ? localActivity : !local && M.mood === 'working' ? M.activity : null
+  const tool = busy && !isHeld && t >= patUntil ? TOOL[busy] : null
   let gazeFree = !['asleep', 'thinking', 'focused', 'held', 'worried', 'sad', 'love', 'joy'].includes(emo) && !tool
 
   if (emo !== lastEmo) { lastEmo = emo; nextIdle = t + rand(2.5, 5); nextFx = t + 0.4 }
@@ -557,14 +576,38 @@ let bubbleText = ''
 function say(line, kind) {
   const b = $('bubble')
   if (line !== bubbleText) {
-    bubbleText = line; b.textContent = line
+    bubbleText = line; b.textContent = line; b.className = ''
     b.classList.add('pop'); setTimeout(() => b.classList.remove('pop'), 160)
     requestAnimationFrame(report)
   }
   b.classList.toggle('quiet', kind === 'quiet')
   b.classList.toggle('heard', kind === 'heard')
 }
+function showApproval() {
+  const b = $('bubble')
+  bubbleText = '\u0000approval:' + approval.id
+  b.textContent = ''
+  b.className = 'ask'
+  const q = document.createElement('div'); q.className = 'q'; q.textContent = approval.question
+  b.appendChild(q)
+  if (approval.detail) { const c = document.createElement('code'); c.textContent = approval.detail; b.appendChild(c) }
+  const row = document.createElement('div'); row.className = 'btns'
+  for (const [label, yes] of [['Deny', false], ['Allow', true]]) {
+    const btn = document.createElement('button'); btn.className = yes ? 'yes' : 'no'; btn.textContent = label
+    btn.addEventListener('click', ev => { ev.stopPropagation(); decide(yes) })
+    row.appendChild(btn)
+  }
+  b.appendChild(row)
+  const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = 'Or press ⌃⌥P and say yes or no.'
+  b.appendChild(hint)
+  requestAnimationFrame(report)
+}
+function decide(yes) {
+  if (!approval) return
+  const h = host('approve'); if (h) h.postMessage({ id: approval.id, allow: yes })
+}
 function redraw() {
+  if (approval && !isHeld && local !== 'listening') return showApproval()
   if (t < patUntil) return say('Hehe, that tickles!', '')
   if (isHeld) return say('Whoa! Where are we going?', '')
   if (local) return say(localLine, localKind)
@@ -615,11 +658,13 @@ function listening(text) {
 }
 function asking(text) { local = 'asking'; localLine = '“' + text + '” Hmm…'; localKind = 'heard'; nextFx = t; redraw() }
 function settle(line) {
+  approval = null
   local = null
   if (line) { local = 'note'; localLine = line; localKind = ''; redraw(); setTimeout(() => { if (local === 'note') { local = null; redraw() } }, 2800) }
   else redraw()
 }
 function answered(text) {
+  approval = null
   local = 'talking'; localLine = text; localKind = ''
   const seconds = Math.max(3, text.split(' ').length * 0.38)
   talkUntil = t + seconds
@@ -631,6 +676,30 @@ function answered(text) {
     local = null; redraw()
   }, Math.max(8000, seconds * 1000 + 3000))
 }
+// Pip is working on your request itself: what kind of tool, and what it says.
+function doing(activity, line) {
+  const changed = activity !== localActivity
+  local = 'doing'; localActivity = activity || 'tool'; localLine = line; localKind = ''
+  if (changed && !action) act('perk')
+  if (localActivity === 'helper') emit('plane', { x: 150, y: 120, vx: 95, vy: -62, g: -14, rot: -24, max: 1.4 })
+  redraw()
+}
+// Pip needs your OK before it runs a command, changes a file or uses a connector.
+function ask(id, question, detail) {
+  approval = { id, question, detail }
+  local = 'approval'
+  act('wave'); emit('q', { x: 156, y: 100, vy: -12, s0: 0.7, s1: 1.1, max: 1.4 })
+  redraw()
+}
+function backToApproval() { if (approval) { local = 'approval'; redraw() } }
+function answeredApproval(allowed) {
+  approval = null
+  local = 'asking'; localLine = allowed ? 'Okay, on it…' : 'Okay, I won\'t.'; localKind = ''
+  if (allowed) act('hop'); else act('nod')
+  redraw()
+}
+// Near the top of the screen, the bubble goes below Pip.
+function below(on) { document.body.classList.toggle('below', !!on); requestAnimationFrame(report) }
 function speaking(on) { isSpeaking = !!on; if (!on) talkUntil = Math.min(talkUntil, t + 0.2) }
 function pat() {
   pats = pats.filter(at => t - at < 5); pats.push(t)

@@ -28,7 +28,7 @@ cat > "$work/Pip.app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Pip</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleShortVersionString</key><string>1.1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
@@ -38,7 +38,7 @@ cat > "$work/Pip.app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-swiftc -O "$here/main.swift" -o "$work/Pip.app/Contents/MacOS/Pip" \
+swiftc -O "$here/main.swift" "$here/Agent.swift" "$here/Sessions.swift" -o "$work/Pip.app/Contents/MacOS/Pip" \
   -framework Cocoa -framework WebKit -framework Speech -framework AVFoundation -framework Carbon -framework ServiceManagement
 mkdir -p "$work/Pip.app/Contents/Resources"
 cp "$here/pet.html" "$work/Pip.app/Contents/Resources/pet.html"

@@ -1,11 +1,13 @@
 // Pip on the desktop: a small transparent window that floats above every app.
 //
 // Drag to move, click to pat, right-click (or the menu bar icon) for the menu.
-// Press Control-Option-P anywhere to talk to Pip: it listens, then answers in
-// its bubble and out loud through the `claude` command (Claude Code's CLI).
+// Press Control-Option-P anywhere to talk to Pip. It answers through the
+// `claude` command (Claude Code's CLI, your own login): it can read files,
+// run commands and use your connectors, asking you before anything that
+// changes your Mac or reaches out (Agent.swift).
 //
-// Optional: anything that writes ~/.claude/pip-pet/status.json (see the
-// README) can tell Pip what it is doing, and Pip acts it out.
+// With "Watch All Claude Sessions" on, every Claude Code session reports to
+// Pip through a hook, and Pip shows the one that needs you (Sessions.swift).
 
 import AVFoundation
 import Carbon
@@ -27,7 +29,24 @@ let pageURL: URL? = {
 }()
 let isDebug = ProcessInfo.processInfo.environment["PIP_DEBUG"] != nil
 
+// Command-line modes, handled before any window opens:
+//   Pip --hook            Claude Code runs this on session events (Sessions.swift)
+//   Pip --install-hooks   adds those hooks to ~/.claude/settings.json
+//   Pip --remove-hooks    takes them out again
+if CommandLine.arguments.contains("--hook") { runHook() }
+for (flag, on) in [("--install-hooks", true), ("--remove-hooks", false)] where CommandLine.arguments.contains(flag) {
+  if let problem = setHooksInstalled(on) { FileHandle.standardError.write(Data((problem + "\n").utf8)); exit(1) }
+  print(on ? "Pip now watches every Claude Code session." : "Pip's hooks are removed.")
+  exit(0)
+}
+
 // ---------- the window ----------
+
+/// A panel macOS doesn't push back below the menu bar, so Pip can sit at the
+/// very top of the screen. Pip keeps its own body on screen instead.
+final class PetPanel: NSPanel {
+  override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+}
 
 final class PetView: WKWebView {
   weak var owner: AppDelegate?
@@ -38,6 +57,11 @@ final class PetView: WKWebView {
   // one that doesn't is a pat.
   override func mouseDown(with event: NSEvent) {
     guard let window = window, let owner = owner else { return }
+    // The bubble's Allow and Deny buttons are the page's own.
+    if owner.isAsking, let bubble = owner.bubbleRect, bubble.contains(event.locationInWindow) {
+      super.mouseDown(with: event)
+      return
+    }
     let startMouse = NSEvent.mouseLocation
     let startOrigin = window.frame.origin
     var lastMouse = startMouse
@@ -55,7 +79,7 @@ final class PetView: WKWebView {
         owner.js("grab()")
       }
       guard isCarried else { continue }
-      window.setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy))
+      window.setFrameOrigin(owner.keepOnScreen(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy), near: mouse))
       let dt = max(next.timestamp - lastTime, 0.004)
       owner.js("drag(\(Int((mouse.x - lastMouse.x) / dt)), \(Int(-(mouse.y - lastMouse.y) / dt)))")
       lastMouse = mouse
@@ -63,6 +87,7 @@ final class PetView: WKWebView {
     }
     if isCarried {
       owner.js("drop()")
+      owner.placeBubble()
       window.saveFrame(usingName: "PipPanel")
     } else {
       owner.js("pat()")
@@ -72,12 +97,22 @@ final class PetView: WKWebView {
   override func menu(for event: NSEvent) -> NSMenu? { owner?.buildMenu() }
 }
 
+
 // ---------- the app ----------
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSMenuDelegate,
-  AVSpeechSynthesizerDelegate
+  AVSpeechSynthesizerDelegate, PipAgentHost
 {
   var hitRects: [NSRect] = []  // where Pip and its bubble are, in the view's own coordinates
+  var bubbleRect: NSRect?      // the bubble alone, in window coordinates
+  var isAsking = false         // a permission question is in the bubble
+  let agent = PipAgent()
+  var sessions: [ClaudeSession] = []
+  var lastShown = ""
+  var isBelow: Bool {          // near the top of the screen the bubble sits under Pip
+    get { UserDefaults.standard.bool(forKey: "bubbleBelow") }
+    set { UserDefaults.standard.set(newValue, forKey: "bubbleBelow") }
+  }
   var isDragging = false
   var isHovering = false
   var lastPointer = NSPoint(x: -9999, y: -9999)
@@ -111,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
   func applicationDidFinishLaunching(_ note: Notification) {
     let size = NSSize(width: 260, height: 300)
-    panel = NSPanel(
+    panel = PetPanel(
       contentRect: NSRect(origin: .zero, size: size),
       styleMask: [.borderless, .nonactivatingPanel],
       backing: .buffered, defer: false)
@@ -134,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     let config = WKWebViewConfiguration()
     config.userContentController.add(self, name: "hit")
     config.userContentController.add(self, name: "log")
+    config.userContentController.add(self, name: "approve")
     view = PetView(frame: NSRect(origin: .zero, size: size), configuration: config)
     view.setValue(false, forKey: "drawsBackground")
     view.navigationDelegate = self
@@ -142,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
     }
     voice.delegate = self
+    agent.host = self
     panel.contentView = view
     panel.orderFrontRegardless()
     if isDebug { NSLog("window: %d", panel.windowNumber) }
@@ -162,12 +199,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       if isDebug { NSLog("page: %@", "\(message.body)") }
       return
     }
+    if message.name == "approve" {
+      if let body = message.body as? [String: Any], let allow = body["allow"] as? Bool { answerApproval(allow) }
+      return
+    }
     guard let parts = message.body as? [[Double]] else { return }
     let height = view.bounds.height
     hitRects = parts.compactMap { part in
       guard part.count == 4 else { return nil }
       return NSRect(x: part[0], y: height - part[1] - part[3], width: part[2], height: part[3])
     }
+    bubbleRect = parts.count >= 2 ? hitRects.first : nil
     if isDebug { NSLog("clickable: %@ of %@", "\(hitRects)", "\(view.bounds)") }
   }
 
@@ -188,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     pointerTick += 1
     if pointerTick % 2 == 0, abs(mouse.x - lastPointer.x) + abs(mouse.y - lastPointer.y) > 2 {
       lastPointer = mouse
-      let face = NSPoint(x: panel.frame.midX, y: panel.frame.minY + 68)
+      let face = NSPoint(x: panel.frame.midX, y: bodyRect(at: panel.frame.origin).minY + 56)
       js("pointerAt(\(Int(mouse.x - face.x)), \(Int(face.y - mouse.y)))")
     }
   }
@@ -201,6 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     isLoaded = true
     lastStamp = nil
+    js("below(\(isBelow))")
+    placeBubble()
     poll()
 
     // For trying Pip without a microphone:
@@ -234,21 +278,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     return String(array.dropFirst().dropLast())
   }
 
-  // ---------- reading the mod's status ----------
+  // ---------- where Pip sits ----------
+  //
+  // The window is 260 x 300: Pip's 240 x 200 stage plus room for the bubble.
+  // Normally the bubble is above Pip and the stage fills the bottom; near the
+  // top of the screen the bubble moves under Pip and the stage fills the top.
+
+  /// Pip's body on screen for a window at `origin`.
+  func bodyRect(at origin: NSPoint) -> NSRect {
+    NSRect(x: origin.x + 80, y: origin.y + (isBelow ? 112 : 12), width: 100, height: 106)
+  }
+
+  /// A window origin that keeps Pip's body on the screen under the pointer,
+  /// up to the menu bar and a little past the sides.
+  func keepOnScreen(_ origin: NSPoint, near mouse: NSPoint) -> NSPoint {
+    guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? panel.screen ?? NSScreen.main else { return origin }
+    let area = screen.visibleFrame
+    let body = bodyRect(at: origin)
+    var dx: CGFloat = 0, dy: CGFloat = 0
+    if body.maxY + 26 > area.maxY { dy = area.maxY - 26 - body.maxY }  // room for the sprout
+    if body.minY < area.minY - 10 { dy = area.minY - 10 - body.minY }
+    if body.minX < area.minX - 50 { dx = area.minX - 50 - body.minX }
+    if body.maxX > area.maxX + 50 { dx = area.maxX + 50 - body.maxX }
+    return NSPoint(x: origin.x + dx, y: origin.y + dy)
+  }
+
+  /// Puts the bubble under Pip when there's no room above it, and back above
+  /// when there is, without moving Pip itself.
+  func placeBubble() {
+    guard let area = (panel.screen ?? NSScreen.main)?.visibleFrame else { return }
+    var origin = panel.frame.origin
+    if !isBelow, origin.y + 300 > area.maxY + 2 {
+      isBelow = true
+      origin.y -= 100
+    } else if isBelow, origin.y + 100 + 300 <= area.maxY {
+      isBelow = false
+      origin.y += 100
+    } else {
+      return
+    }
+    js("below(\(isBelow))")
+    panel.setFrameOrigin(origin)
+    panel.saveFrame(usingName: "PipPanel")
+  }
+
+  // ---------- what Claude is doing, in every session ----------
 
   func poll() {
-    guard isLoaded,
-      let stamp = (try? FileManager.default.attributesOfItem(atPath: statusURL.path))?[.modificationDate] as? Date,
-      stamp != lastStamp,
-      let data = try? Data(contentsOf: statusURL),
-      let status = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-      let json = String(data: data, encoding: .utf8)
-    else { return }
-    lastStamp = stamp
-    sessionId = status["sessionId"] as? String
-    js("show(\(json))")
+    guard isLoaded else { return }
+    sessions = readSessions()
+    var status: [String: Any] = [:]
+    if let top = sessions.first {
+      let busy = sessions.filter { $0.urgency >= 1 }
+      let named = busy.count > 1 && !top.project.isEmpty && top.project != "this session"
+      status = ["mood": top.mood == "idle" ? "done" : top.mood, "activity": top.activity, "line": named ? "\(top.project): \(top.line)" : top.line]
+      if top.mood == "idle" || (top.mood == "done" && top.ageSeconds > 90) { status["mood"] = top.ageSeconds > 300 ? "sleeping" : "done" }
+      if top.mood == "idle", top.ageSeconds <= 300 { status["line"] = "Ready when you are." }
+    }
 
-    if let reply = status["reply"] as? [String: Any],
+    // The Pip mod's status file also carries its spoken replies.
+    let modStatus = (try? Data(contentsOf: statusURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+    sessionId = modStatus?["sessionId"] as? String
+    if let reply = modStatus?["reply"] { status["reply"] = reply }
+
+    if !status.isEmpty, let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
+      let json = String(data: data, encoding: .utf8), json != lastShown
+    {
+      lastShown = json
+      js("show(\(json))")
+    }
+
+    guard let modStatus = modStatus else { return }
+    if let reply = modStatus["reply"] as? [String: Any],
       let id = reply["id"] as? String, id != spokenReplyId,
       let text = reply["text"] as? String,
       let at = reply["at"] as? Double, at > startedAt - 1000
@@ -342,6 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       said.isEnabled = false
       menu.addItem(.separator())
     }
+    if agent.isRunning { add("Stop What Pip Is Doing", #selector(stopAgent)) ; menu.addItem(.separator()) }
     add(panel.isVisible ? "Hide Pip" : "Show Pip", #selector(toggleShown))
     add("Move Pip to the Corner", #selector(moveToCorner))
     add(isListening ? "Stop Listening (\(shortcutLabel))" : "Talk to Pip (\(shortcutLabel))", #selector(toggleListening))
@@ -350,6 +452,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     add("Speak Answers", #selector(toggleSpeaking), on: speaksAnswers)
     add("Pet Voice", #selector(togglePetVoice), on: usesPetVoice)
     add("Open at Login", #selector(toggleOpenAtLogin), on: opensAtLogin)
+    menu.addItem(.separator())
+
+    let access = NSMenuItem(title: "Computer Access", action: nil, keyEquivalent: "")
+    let levels = NSMenu()
+    for level in ComputerAccess.allCases {
+      let item = levels.addItem(withTitle: level.title, action: #selector(chooseAccess(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = level.rawValue
+      item.state = ComputerAccess.current == level ? .on : .off
+    }
+    access.submenu = levels
+    menu.addItem(access)
+    add("Watch All Claude Sessions", #selector(toggleWatchSessions), on: areHooksInstalled())
+    let live = sessions.filter { $0.ageSeconds < 3600 }
+    if !live.isEmpty {
+      let header = menu.addItem(withTitle: "Claude Sessions", action: nil, keyEquivalent: "")
+      header.isEnabled = false
+      for one in live.prefix(8) {
+        let dot = one.mood == "waiting" ? "●" : one.urgency >= 2 ? "◐" : "○"
+        let title = "\(dot) \(one.project.isEmpty ? "session" : one.project): \(one.stateWord) · \(one.line)"
+        let item = menu.addItem(withTitle: title.count > 70 ? String(title.prefix(69)) + "…" : title, action: #selector(openClaude), keyEquivalent: "")
+        item.target = self
+        item.indentationLevel = 1
+      }
+    }
     menu.addItem(.separator())
     add("Open Claude", #selector(openClaude))
     add("Quit Pip", #selector(quit))
@@ -368,8 +495,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
   @objc func moveToCorner() {
     guard let area = NSScreen.main?.visibleFrame else { return }
+    if isBelow { isBelow = false; js("below(false)") }
     panel.setFrameOrigin(NSPoint(x: area.maxX - panel.frame.width - 24, y: area.minY + 24))
+    panel.saveFrame(usingName: "PipPanel")
     panel.orderFrontRegardless()
+  }
+
+  @objc func chooseAccess(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let level = ComputerAccess(rawValue: raw) else { return }
+    ComputerAccess.current = level
+    js("settle(\(quoted("Okay: \(level.title.lowercased()).")))")
+  }
+
+  @objc func toggleWatchSessions() {
+    let on = !areHooksInstalled()
+    if let problem = setHooksInstalled(on) {
+      js("settle(\(quoted(problem)))")
+    } else {
+      js("settle(\(quoted(on ? "I'm watching every Claude Code session now. New sessions show up as they start." : "Okay, I stopped watching your sessions.")))")
+    }
+  }
+
+  @objc func stopAgent() {
+    agent.stop(saying: "Okay, I stopped.")
   }
 
   @objc func patPip() {
@@ -501,6 +649,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     task = nil
 
     let said = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+    if agent.isWaitingForApproval {
+      guard send, !said.isEmpty else { js("backToApproval()"); return }
+      NSSound(named: "Pop")?.play()
+      let allowed = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "allow", "go ahead", "do it", "approve", "fine", "please do"]
+        .contains { said.lowercased().hasPrefix($0) }
+      agent.decide(byVoice: said)
+      isAsking = false
+      js("answeredApproval(\(allowed))")
+      return
+    }
     guard send, !said.isEmpty else {
       js("settle(\(quoted("I didn't catch that. Press \(shortcutLabel) and try again.")))")
       return
@@ -511,113 +669,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   }
 
   func ask(_ said: String) {
-    var question: [String: Any] = [
-      "id": UUID().uuidString,
-      "text": said,
-      "at": Date().timeIntervalSince1970 * 1000,
-    ]
-    if let sessionId = sessionId { question["to"] = sessionId }
-    let id = question["id"] as! String
-    do {
-      try FileManager.default.createDirectory(at: pipFolder, withIntermediateDirectories: true)
-      try JSONSerialization.data(withJSONObject: question).write(to: askURL, options: .atomic)
-    } catch {
-      answerAlone(said)
-      return
-    }
-    // A running session claims the question within a second. If none does
-    // (Claude is closed, or the session that last fed Pip has ended), Pip
-    // claims it and answers on its own.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-      guard let self = self, self.isUnclaimed(id) else { return }
-      try? JSONSerialization.data(withJSONObject: ["id": id, "handled": true, "by": "desktop"]).write(to: askURL, options: .atomic)
-      self.answerAlone(said)
-    }
-    // Never stay stuck thinking.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in self?.js("if (local === 'asking') settle()") }
+    // Pip answers itself, with tools, connectors and every session's history.
+    js("if (local === 'listening') asking(" + quoted(said) + ")")
+    agent.start(said: said, history: history, sessions: sessionsSummary(sessions))
   }
 
-  func isUnclaimed(_ id: String) -> Bool {
-    guard let data = try? Data(contentsOf: askURL),
-      let ask = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    else { return false }
-    return ask["id"] as? String == id && ask["handled"] as? Bool != true
+  func answerAlone(_ said: String) { ask(said) }
+
+  // ---------- Pip's agent reporting back ----------
+
+  func agentDoing(activity: String, line: String) {
+    js("doing(\(quoted(activity)), \(quoted(line)))")
   }
 
-  // ---------- answering without a session ----------
-
-  let alonePrompt = """
-    You are Pip, a small, friendly pet that lives on the user's Mac desktop and keeps them company.
-    Chat, answer questions and give quick advice. Reply in one to three short sentences that sound
-    natural when read aloud, in the language the user spoke. Use plain words only: no markdown, lists,
-    code or emoji. You cannot see the user's screen or files and you have no tools.
-    """
-
-  func claudePath() -> String? {
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let places = [
-      "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
-      "\(home)/.local/bin/claude", "\(home)/.claude/local/claude", "\(home)/.npm-global/bin/claude",
-    ]
-    return places.first { FileManager.default.isExecutableFile(atPath: $0) }
+  func agentNeedsApproval(question: String, spoken: String, detail: String) {
+    isAsking = true
+    panel.orderFrontRegardless()
+    js("ask(\(quoted(UUID().uuidString)), \(quoted(question)), \(quoted(detail)))")
+    NSSound(named: "Glass")?.play()
+    speak(spoken)
   }
 
-  func answerAlone(_ said: String) {
-    guard let claude = claudePath() else {
-      finishAnswer(said, "I can't find the claude command on this Mac, so I can only answer while Claude Code is open.", remember: false)
-      return
-    }
-    var prompt = ""
-    if !history.isEmpty {
-      prompt += "Earlier in this chat:\n"
-      for turn in history.suffix(5) { prompt += "User: \(turn.said)\nPip: \(turn.reply)\n" }
-      prompt += "\n"
-    }
-    prompt += "The user just said out loud: \"\(said)\""
+  func answerApproval(_ allow: Bool) {
+    guard agent.isWaitingForApproval else { return }
+    agent.decide(allow: allow)
+    isAsking = false
+    js("answeredApproval(\(allow))")
+  }
 
-    DispatchQueue.global(qos: .userInitiated).async {
-      let run = Process()
-      run.executableURL = URL(fileURLWithPath: claude)
-      run.arguments = [
-        "-p", "--model", "haiku", "--tools", "", "--no-session-persistence",
-        "--output-format", "text", "--system-prompt", self.alonePrompt,
-      ]
-      run.currentDirectoryURL = pipFolder
-      var env = ProcessInfo.processInfo.environment
-      env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
-      run.environment = env
-      let input = Pipe(), output = Pipe()
-      run.standardInput = input
-      run.standardOutput = output
-      run.standardError = output
-
-      var text = ""
-      do {
-        try run.run()
-        input.fileHandleForWriting.write(prompt.data(using: .utf8)!)
-        try? input.fileHandleForWriting.close()
-        let killer = DispatchWorkItem { if run.isRunning { run.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 60, execute: killer)
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        run.waitUntilExit()
-        killer.cancel()
-        text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      } catch {
-        text = ""
-      }
-
-      let isSignedOut = text.localizedCaseInsensitiveContains("authenticate") || text.localizedCaseInsensitiveContains("/login")
-        || text.localizedCaseInsensitiveContains("not logged in")
-      DispatchQueue.main.async {
-        if isSignedOut {
-          self.finishAnswer(said, "I need you to sign me in first. Open Terminal and run: claude auth login", remember: false)
-        } else if run.terminationStatus != 0 || text.isEmpty {
-          self.finishAnswer(said, "Sorry, I couldn't think of an answer just now.", remember: false)
-        } else {
-          self.finishAnswer(said, text, remember: true)
-        }
-      }
-    }
+  func agentFinished(said: String, reply: String, remember: Bool) {
+    isAsking = false
+    finishAnswer(said, reply, remember: remember)
   }
 
   func finishAnswer(_ said: String, _ reply: String, remember: Bool) {
