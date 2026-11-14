@@ -341,7 +341,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     if let top = sessions.first {
       let busy = sessions.filter { $0.urgency >= 1 }
       let named = busy.count > 1 && !top.label.isEmpty && top.label != "this session"
-      status = ["mood": top.mood == "idle" ? "done" : top.mood, "activity": top.activity, "line": named ? "\(top.label): \(top.line)" : top.line]
+      status = ["mood": top.mood == "idle" ? "done" : top.mood, "activity": top.activity, "line": top.line]
+      // Sessions listed under "quietNames" never show their name in the bubble:
+      //   defaults write local.pip-pet.desktop quietNames -array "Session title"
+      let quiet = UserDefaults.standard.stringArray(forKey: "quietNames") ?? []
+      let isQuiet = quiet.contains { $0.caseInsensitiveCompare(top.title) == .orderedSame || $0.caseInsensitiveCompare(top.project) == .orderedSame }
+      if named && !isQuiet { status["from"] = top.label }
       if top.mood == "idle" || (top.mood == "done" && top.ageSeconds > 90) { status["mood"] = top.ageSeconds > 300 ? "sleeping" : "done" }
       if top.mood == "idle", top.ageSeconds <= 300 { status["line"] = "Ready when you are." }
     }

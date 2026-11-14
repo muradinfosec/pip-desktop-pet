@@ -21,6 +21,7 @@
   #bubble::after { content: ""; position: absolute; left: 50%; bottom: -6px; margin-left: -6px;
     border: 6px solid transparent; border-top-color: rgba(255,255,255,0.96); border-bottom: 0; }
   #bubble.quiet { opacity: .55; }
+  #bubble .from { font-size: 10.5px; font-weight: 600; color: #A07A63; margin-bottom: 1px; letter-spacing: .1px; }
   #bubble.heard { font-style: italic; color: #3A5FB0; }
   #bubble.pop { transform: scale(1.07); }
   #stage { display: block; width: 240px; height: 200px; margin-top: -58px; overflow: visible; }
@@ -573,10 +574,13 @@ function frame(now) {
 
 // ---------- the speech bubble ----------
 let bubbleText = ''
-function say(line, kind) {
+function say(line, kind, from) {
   const b = $('bubble')
-  if (line !== bubbleText) {
-    bubbleText = line; b.textContent = line; b.className = ''
+  const key = (from ? from + '\u0001' : '') + line
+  if (key !== bubbleText) {
+    bubbleText = key; b.textContent = ''; b.className = ''
+    if (from) { const f = document.createElement('div'); f.className = 'from'; f.textContent = from; b.appendChild(f) }
+    b.appendChild(document.createTextNode(line))
     b.classList.add('pop'); setTimeout(() => b.classList.remove('pop'), 160)
     requestAnimationFrame(report)
   }
@@ -611,7 +615,7 @@ function redraw() {
   if (t < patUntil) return say('Hehe, that tickles!', '')
   if (isHeld) return say('Whoa! Where are we going?', '')
   if (local) return say(localLine, localKind)
-  say(M.line || '', M.mood === 'sleeping' ? 'quiet' : '')
+  say(M.line || '', M.mood === 'sleeping' ? 'quiet' : '', M.from)
 }
 // Tells the app where Pip and the bubble are, so clicks anywhere else pass
 // through to the windows underneath.
@@ -628,7 +632,7 @@ window.addEventListener('resize', report)
 // ---------- what the app calls ----------
 function show(status) {
   const prev = M
-  M = { mood: status.mood || 'done', activity: status.activity || '', line: status.line || '' }
+  M = { mood: status.mood || 'done', activity: status.activity || '', line: status.line || '', from: status.from || '' }
   if (M.mood !== prev.mood) {
     moodAt = t
     if (prev.mood === 'sleeping') act('wake')

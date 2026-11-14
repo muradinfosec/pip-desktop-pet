@@ -133,7 +133,7 @@ struct ClaudeSession {
   /// What to call it: the desktop app's title, else the project folder.
   var label: String {
     let name = title.isEmpty ? project : title
-    return name.count > 28 ? String(name.prefix(27)) + "…" : name
+    return name.count > 34 ? String(name.prefix(33)) + "…" : name
   }
 
   /// How much this session wants Pip's attention right now.

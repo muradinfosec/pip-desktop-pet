@@ -68,6 +68,12 @@ Pip sees every Claude Code session on your Mac, in the terminal and in the Claud
 
 For one more signal, turn on **Watch All Claude Sessions** in Pip's menu: it adds a small hook to `~/.claude/settings.json` (keeping a backup at `~/.claude/settings.json.pip-backup`) so Pip also knows when a session is waiting for your approval. Turning it off removes the hook.
 
+When several sessions are busy, Pip shows the session's name in a small caption above its line. To keep a session's name out of the bubble, list it by title or project folder:
+
+```bash
+defaults write local.pip-pet.desktop quietNames -array "My session title"
+```
+
 To see what Pip sees, run:
 
 ```bash
