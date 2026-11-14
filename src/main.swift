@@ -34,6 +34,16 @@ let isDebug = ProcessInfo.processInfo.environment["PIP_DEBUG"] != nil
 //   Pip --install-hooks   adds those hooks to ~/.claude/settings.json
 //   Pip --remove-hooks    takes them out again
 if CommandLine.arguments.contains("--hook") { runHook() }
+//   Pip --list-sessions   prints every Claude Code session Pip can see
+if CommandLine.arguments.contains("--list-sessions") {
+  let found = readSessions()
+  if found.isEmpty { print("No Claude Code sessions in the last two hours.") }
+  for one in found {
+    let minutes = Int(one.ageSeconds / 60)
+    print("\(one.label) [\(one.stateWord), \(minutes) min ago] \(one.line)\(one.prompt.isEmpty ? "" : " | last asked: \(one.prompt)")")
+  }
+  exit(0)
+}
 for (flag, on) in [("--install-hooks", true), ("--remove-hooks", false)] where CommandLine.arguments.contains(flag) {
   if let problem = setHooksInstalled(on) { FileHandle.standardError.write(Data((problem + "\n").utf8)); exit(1) }
   print(on ? "Pip now watches every Claude Code session." : "Pip's hooks are removed.")
@@ -330,8 +340,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var status: [String: Any] = [:]
     if let top = sessions.first {
       let busy = sessions.filter { $0.urgency >= 1 }
-      let named = busy.count > 1 && !top.project.isEmpty && top.project != "this session"
-      status = ["mood": top.mood == "idle" ? "done" : top.mood, "activity": top.activity, "line": named ? "\(top.project): \(top.line)" : top.line]
+      let named = busy.count > 1 && !top.label.isEmpty && top.label != "this session"
+      status = ["mood": top.mood == "idle" ? "done" : top.mood, "activity": top.activity, "line": named ? "\(top.label): \(top.line)" : top.line]
       if top.mood == "idle" || (top.mood == "done" && top.ageSeconds > 90) { status["mood"] = top.ageSeconds > 300 ? "sleeping" : "done" }
       if top.mood == "idle", top.ageSeconds <= 300 { status["line"] = "Ready when you are." }
     }
@@ -471,7 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       header.isEnabled = false
       for one in live.prefix(8) {
         let dot = one.mood == "waiting" ? "●" : one.urgency >= 2 ? "◐" : "○"
-        let title = "\(dot) \(one.project.isEmpty ? "session" : one.project): \(one.stateWord) · \(one.line)"
+        let title = "\(dot) \(one.label.isEmpty ? "session" : one.label): \(one.stateWord) · \(one.line)"
         let item = menu.addItem(withTitle: title.count > 70 ? String(title.prefix(69)) + "…" : title, action: #selector(openClaude), keyEquivalent: "")
         item.target = self
         item.indentationLevel = 1

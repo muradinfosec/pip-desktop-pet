@@ -12,7 +12,7 @@ A little sprout-headed pet that lives on your Mac desktop. Pip floats above your
 - **Notices you.** Its eyes follow your pointer, and hovering makes it blush. Click to pat it (three quick pats make it jump); drag it and it dangles, then lands with a puff of dust.
 - **Talks.** Press **⌃⌥P** (Control-Option-P) anywhere and speak. Pip listens, then answers in its speech bubble and out loud in a small, high pet voice.
 - **Does things for you.** Pip can read files, run commands and use your connected services, like Jira, Confluence or email. It always asks first before running a command, changing a file or sending anything.
-- **Watches your Claude Code sessions.** Optionally, every Claude Code session reports to Pip, so it shows the one that needs you and can tell you what any of them is doing.
+- **Watches your Claude Code sessions.** Pip sees every Claude Code session on your Mac, shows the busy one, and can tell you what any of them is doing.
 
 ## Install
 
@@ -60,13 +60,21 @@ Connectors are the ones on your claude.ai account. A connector that shows as nee
 
 ## Watching your Claude Code sessions
 
-Turn on **Watch All Claude Sessions** in Pip's menu. Pip then adds a small hook to `~/.claude/settings.json`, keeping a backup at `~/.claude/settings.json.pip-backup`, so every Claude Code session, in the terminal or the desktop app, reports to Pip. Pip then:
+Pip sees every Claude Code session on your Mac, in the terminal and in the Claude desktop app, with no setup. It reads the latest lines of each session's conversation in `~/.claude/projects/` and uses the desktop app's session titles. Pip then:
 
-- shows the session that needs you most, with its project name in the bubble,
-- lists every session and its state in the menu,
+- shows the busiest session, with its name in the bubble when several are working,
+- lists every session and what it's doing in the menu,
 - can read a session's history when you ask what it's doing.
 
-Turning the switch off removes the hook again. Regular claude.ai chats don't run hooks, so Pip only sees Claude Code sessions.
+For one more signal, turn on **Watch All Claude Sessions** in Pip's menu: it adds a small hook to `~/.claude/settings.json` (keeping a backup at `~/.claude/settings.json.pip-backup`) so Pip also knows when a session is waiting for your approval. Turning it off removes the hook.
+
+To see what Pip sees, run:
+
+```bash
+~/Applications/Pip.app/Contents/MacOS/Pip --list-sessions
+```
+
+Regular claude.ai chats are stored on Claude's servers, not on your Mac, so Pip can't see them.
 
 ## Using Pip
 

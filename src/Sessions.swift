@@ -1,13 +1,15 @@
-// Every Claude Code session, as Pip sees it.
+// Every Claude Code session, as Pip sees it, from three places:
 //
-// Claude Code runs Pip as a hook (`Pip --hook`) on each prompt, tool call,
-// notification and stop, in every terminal and desktop session. The hook writes
-// one small file per session to ~/.claude/pip-pet/sessions/, and the app reads
-// them all to show the session that needs you most and to answer questions
-// about any of them.
+// 1. Each session's conversation file in ~/.claude/projects/, which Claude
+//    Code appends to as it works: Pip reads the last lines of the recently
+//    changed ones to tell what each session is doing. No setup needed.
+// 2. The Claude desktop app's record of each Code-tab session, for its title.
+// 3. Optionally, a hook (`Pip --hook`) on every prompt, tool call,
+//    notification and stop, which adds what files can't show: a session
+//    waiting for your approval. "Watch All Claude Sessions" in Pip's menu adds
+//    or removes it in ~/.claude/settings.json, keeping a backup first.
 //
-// "Watch All Claude Sessions" in Pip's menu adds or removes these hooks in
-// ~/.claude/settings.json (a backup of the file is kept beside it first).
+// Regular claude.ai chats aren't on this Mac, so Pip can't see those.
 
 import Foundation
 
@@ -116,6 +118,7 @@ func runHook() -> Never {
 
 struct ClaudeSession {
   var id: String
+  var title = ""
   var project: String
   var cwd: String
   var mood: String
@@ -126,6 +129,12 @@ struct ClaudeSession {
   var updatedAt: Double  // ms since 1970
 
   var ageSeconds: Double { Date().timeIntervalSince1970 - updatedAt / 1000 }
+
+  /// What to call it: the desktop app's title, else the project folder.
+  var label: String {
+    let name = title.isEmpty ? project : title
+    return name.count > 28 ? String(name.prefix(27)) + "…" : name
+  }
 
   /// How much this session wants Pip's attention right now.
   var urgency: Int {
@@ -172,6 +181,8 @@ func session(from record: [String: Any]) -> ClaudeSession? {
 /// are left out, and one that stopped reporting mid-task counts as idle.
 func readSessions() -> [ClaudeSession] {
   var byId: [String: ClaudeSession] = [:]
+  for one in sessionScanner.scan() { byId[one.id] = one }
+  let titles = sessionScanner.titles
   let files = (try? FileManager.default.contentsOfDirectory(at: sessionsFolder, includingPropertiesForKeys: nil)) ?? []
   var records: [[String: Any]] = files.filter { $0.pathExtension == "json" }.compactMap {
     (try? Data(contentsOf: $0)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
@@ -191,8 +202,10 @@ func readSessions() -> [ClaudeSession] {
       continue
     }
     if let known = byId[one.id], one.project == "this session" { one.project = known.project }
+    if let known = byId[one.id], one.transcript.isEmpty { one.transcript = known.transcript }
     byId[one.id] = one
   }
+  for (id, title) in titles where byId[id] != nil { byId[id]?.title = title }
   return byId.values.sorted { ($0.urgency, $0.updatedAt) > ($1.urgency, $1.updatedAt) }
 }
 
@@ -203,7 +216,7 @@ func sessionsSummary(_ sessions: [ClaudeSession]) -> String {
   var out = "The user's Claude Code sessions right now (most urgent first):\n"
   for s in sessions.prefix(12) {
     let when = formatter.localizedString(for: Date(timeIntervalSince1970: s.updatedAt / 1000), relativeTo: Date())
-    out += "- \(s.project.isEmpty ? "a session" : s.project) (\(s.cwd)): \(s.stateWord), \"\(s.line)\", \(when)"
+    out += "- \(s.title.isEmpty ? "" : "\"\(s.title)\" in ")\(s.project.isEmpty ? "a session" : s.project) (\(s.cwd)): \(s.stateWord), \"\(s.line)\", \(when)"
     if !s.prompt.isEmpty { out += "; last asked: \"\(s.prompt)\"" }
     if !s.transcript.isEmpty { out += "; transcript: \(s.transcript)" }
     out += "\n"
@@ -211,6 +224,111 @@ func sessionsSummary(_ sessions: [ClaudeSession]) -> String {
   out += "Each transcript is that session's full conversation as JSON lines; read the end of it when the user asks what a session is doing or did."
   return out
 }
+
+// ---------- reading sessions from their conversation files ----------
+
+let projectsFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+let desktopSessionsFolder = FileManager.default.homeDirectoryForCurrentUser
+  .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
+
+final class SessionScanner {
+  private var cache: [String: (Date, ClaudeSession?)] = [:]
+  private var lastScan = Date.distantPast
+  private var lastTitleScan = Date.distantPast
+  private var found: [ClaudeSession] = []
+  private(set) var titles: [String: String] = [:]
+
+  /// Sessions whose conversation changed in the last two hours. Re-reads a
+  /// file only when it changed, and looks for new ones every two seconds.
+  func scan() -> [ClaudeSession] {
+    let now = Date()
+    if now.timeIntervalSince(lastTitleScan) > 5 { lastTitleScan = now; readTitles() }
+    guard now.timeIntervalSince(lastScan) > 2 else { return found }
+    lastScan = now
+    var result: [ClaudeSession] = []
+    let fm = FileManager.default
+    let folders = (try? fm.contentsOfDirectory(at: projectsFolder, includingPropertiesForKeys: nil)) ?? []
+    for folder in folders {
+      let files = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+      for file in files where file.pathExtension == "jsonl" {
+        guard let changed = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+          now.timeIntervalSince(changed) < 2 * 3600
+        else { continue }
+        if let known = cache[file.path], known.0 == changed {
+          if let one = known.1 { result.append(one) }
+          continue
+        }
+        let one = readTranscript(file, changed: changed)
+        cache[file.path] = (changed, one)
+        if let one = one { result.append(one) }
+      }
+    }
+    found = result
+    return result
+  }
+
+  /// The desktop app's title for each of its Code sessions, by session id.
+  private func readTitles() {
+    var out: [String: String] = [:]
+    let fm = FileManager.default
+    guard let walker = fm.enumerator(at: desktopSessionsFolder, includingPropertiesForKeys: nil) else { return }
+    for case let file as URL in walker where file.lastPathComponent.hasPrefix("local_") && file.pathExtension == "json" {
+      guard let data = try? Data(contentsOf: file),
+        let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        record["isArchived"] as? Bool != true,
+        let id = record["cliSessionId"] as? String,
+        let title = record["title"] as? String, !title.isEmpty
+      else { continue }
+      out[id] = title
+    }
+    titles = out
+  }
+
+  /// What a session is doing, from the last entries of its conversation.
+  private func readTranscript(_ file: URL, changed: Date) -> ClaudeSession? {
+    guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+    defer { try? handle.close() }
+    let size = (try? handle.seekToEnd()) ?? 0
+    try? handle.seek(toOffset: size > 65536 ? size - 65536 : 0)
+    guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
+
+    var one = ClaudeSession(
+      id: file.deletingPathExtension().lastPathComponent, project: "", cwd: "", mood: "idle", activity: "",
+      line: "Ready", prompt: "", transcript: file.path, updatedAt: changed.timeIntervalSince1970 * 1000)
+    var isDecided = false
+    for raw in text.split(separator: "\n").reversed() {
+      guard let entry = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] else { continue }
+      if entry["isSidechain"] as? Bool == true { continue }
+      if one.cwd.isEmpty, let cwd = entry["cwd"] as? String { one.cwd = cwd; one.project = (cwd as NSString).lastPathComponent }
+      let type = entry["type"] as? String
+      let content = (entry["message"] as? [String: Any])?["content"]
+      if type == "user" {
+        let blocks = content as? [[String: Any]] ?? []
+        let typed = (content as? String) ?? blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String
+        let isToolResult = blocks.contains { $0["type"] as? String == "tool_result" }
+        if one.prompt.isEmpty, let typed = typed, !isToolResult, !typed.hasPrefix("<") {
+          let flat = typed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+          one.prompt = flat.count > 120 ? String(flat.prefix(119)) + "…" : flat
+        }
+        if !isDecided, typed != nil || isToolResult { one.mood = "thinking"; one.line = "Thinking…"; isDecided = true }
+      } else if type == "assistant", !isDecided {
+        let blocks = content as? [[String: Any]] ?? []
+        if let use = blocks.last(where: { $0["type"] as? String == "tool_use" }), let name = use["name"] as? String {
+          let said = describeTool(name, (use["input"] as? [String: Any]) ?? [:])
+          one.mood = said.mood; one.activity = said.activity; one.line = said.line
+        } else {
+          one.mood = "done"; one.line = "All done! Your turn."
+        }
+        isDecided = true
+      }
+      if isDecided && !one.cwd.isEmpty && !one.prompt.isEmpty { break }
+    }
+    if one.cwd.isEmpty { one.project = file.deletingLastPathComponent().lastPathComponent }
+    return one
+  }
+}
+
+let sessionScanner = SessionScanner()
 
 // ---------- adding and removing the hooks ----------
 
