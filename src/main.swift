@@ -121,6 +121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   var lastShown = ""
   var shownSessionId: String?  // the session in Pip's bubble, kept until another needs you more
   var lastSeenDebug = ""
+  var lastMoods: [String: String] = [:]
+  var watching: NSObjectProtocol?  // keeps macOS from napping Pip while it watches
   var lastAnswer = ""
   var isBelow: Bool {          // near the top of the screen the bubble sits under Pip
     get { UserDefaults.standard.bool(forKey: "bubbleBelow") }
@@ -228,7 +230,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     registerShortcut()
     setUpOpenAtLogin()
     setUpMenuBar()
-    Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in self?.poll() }
+    // Watch without pause: macOS may not nap Pip, and the timer keeps
+    // firing while a menu is open or Pip is being carried.
+    watching = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "Watching Claude sessions")
+    let watch = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in self?.poll() }
+    RunLoop.main.add(watch, forMode: .common)
     panel.ignoresMouseEvents = true
     let follow = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.followPointer() }
     RunLoop.main.add(follow, forMode: .common)
@@ -413,11 +419,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       if top.mood == "idle", top.ageSeconds <= 300 { status["line"] = "Ready when you are." }
     }
 
-    // The Pip mod's status file also carries its spoken replies.
-    let modStatus = (try? Data(contentsOf: statusURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
-    sessionId = modStatus?["sessionId"] as? String
-    if let reply = modStatus?["reply"] { status["reply"] = reply }
-
     if !status.isEmpty, let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
       let json = String(data: data, encoding: .utf8), json != lastShown
     {
@@ -426,15 +427,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       js("show(\(json))")
     }
 
-    guard let modStatus = modStatus else { return }
-    if let reply = modStatus["reply"] as? [String: Any],
-      let id = reply["id"] as? String, id != spokenReplyId,
-      let text = reply["text"] as? String,
-      let at = reply["at"] as? Double, at > startedAt - 1000
-    {
-      spokenReplyId = id
-      js("settle()")
-      speak(text)
+    // Tell you when a session you aren't looking at finishes or needs you.
+    for one in sessions {
+      if let before = lastMoods[one.id], before != one.mood, one.id != shownSessionId,
+        ["working", "thinking"].contains(before), one.mood == "done" || one.mood == "waiting"
+      {
+        let name = one.label.isEmpty ? "A session" : one.label
+        js("if (!local) settle(\(quoted(one.mood == "done" ? "\(name) finished." : "\(name) needs you.")))")
+      }
+      lastMoods[one.id] = one.mood
     }
   }
 
@@ -559,11 +560,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     dictation.submenu = options
     menu.addItem(dictation)
     add("Watch All Claude Sessions", #selector(toggleWatchSessions), on: areHooksInstalled())
-    let live = sessions.filter { $0.ageSeconds < 3600 }
+    let live = sessions
     if !live.isEmpty {
-      let header = menu.addItem(withTitle: "Claude Sessions", action: nil, keyEquivalent: "")
+      let busy = live.filter { $0.urgency >= 2 }.count
+      let header = menu.addItem(withTitle: busy > 0 ? "Claude Sessions · \(busy) active" : "Claude Sessions", action: nil, keyEquivalent: "")
       header.isEnabled = false
-      for one in live.prefix(8) {
+      for one in live.prefix(10) {
         let dot = one.mood == "waiting" ? "●" : one.urgency >= 2 ? "◐" : "○"
         let title = "\(dot) \(one.label.isEmpty ? "session" : one.label): \(one.stateWord) · \(one.line)"
         let item = menu.addItem(withTitle: title.count > 70 ? String(title.prefix(69)) + "…" : title, action: #selector(openClaude), keyEquivalent: "")

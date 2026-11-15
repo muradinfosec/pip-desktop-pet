@@ -176,9 +176,9 @@ func session(from record: [String: Any]) -> ClaudeSession? {
     updatedAt: (record["updatedAt"] as? Double) ?? 0)
 }
 
-/// Every session Pip knows about, from the hooks and from the Pip mod's own
-/// status file, newest record per session. Sessions quiet for over two hours
-/// are left out, and one that stopped reporting mid-task counts as idle.
+/// Every session Pip knows about: read from the conversations, with the
+/// hooks' records on top when they are newer. Sessions quiet for over twelve
+/// hours are left out, and one that stopped mid-task counts as idle.
 func readSessions() -> [ClaudeSession] {
   var byId: [String: ClaudeSession] = [:]
   for one in sessionScanner.scan() { byId[one.id] = one }
@@ -187,16 +187,24 @@ func readSessions() -> [ClaudeSession] {
   var records: [[String: Any]] = files.filter { $0.pathExtension == "json" }.compactMap {
     (try? Data(contentsOf: $0)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
   }
-  if let data = try? Data(contentsOf: statusURL), var mod = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-    mod["sessionId"] != nil
+  // A status file a script wrote by hand (see the README) counts as one more
+  // thing to show while it is fresh. One that names a session is the old Pip
+  // mod's: its session is already read from the conversation itself, and a
+  // stale copy must never outrank what is really happening.
+  if let data = try? Data(contentsOf: statusURL), var manual = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+    manual["sessionId"] == nil, manual["mood"] != nil
   {
-    if mod["project"] == nil { mod["project"] = "this session" }
-    records.append(mod)
+    let written = (try? FileManager.default.attributesOfItem(atPath: statusURL.path))?[.modificationDate] as? Date
+    let at = (manual["updatedAt"] as? Double) ?? (written?.timeIntervalSince1970 ?? 0) * 1000
+    if Date().timeIntervalSince1970 - at / 1000 < 600 {
+      manual["sessionId"] = "status-file"; manual["updatedAt"] = at
+      records.append(manual)
+    }
   }
   for record in records {
     guard var one = session(from: record) else { continue }
-    if one.ageSeconds > 2 * 3600 { continue }
-    if ["working", "thinking"].contains(one.mood), one.ageSeconds > 15 * 60 { one.mood = "idle"; one.line = "Quiet for a while" }
+    if one.ageSeconds > watchWindow { continue }
+    if one.ageSeconds > (one.mood == "working" ? 60 * 60 : one.mood == "thinking" ? 15 * 60 : .infinity) { one.mood = "idle"; one.line = "Quiet for a while" }
     if let known = byId[one.id], known.updatedAt >= one.updatedAt {
       if known.project == "this session", !one.project.isEmpty { byId[one.id]?.project = one.project }
       continue
@@ -206,6 +214,13 @@ func readSessions() -> [ClaudeSession] {
     byId[one.id] = one
   }
   for (id, title) in titles where byId[id] != nil { byId[id]?.title = title }
+  // After a restart Claude continues a conversation in a new file and leaves
+  // the old one behind. The desktop app knows which is current: a file that
+  // carries the same title but isn't the one the app points to is the old copy.
+  let current = Set(titles.values)
+  for (id, one) in byId where titles[id] == nil && !one.title.isEmpty && current.contains(one.title) {
+    byId.removeValue(forKey: id)
+  }
   return byId.values.sorted { ($0.urgency, $0.updatedAt) > ($1.urgency, $1.updatedAt) }
 }
 
@@ -227,6 +242,8 @@ func sessionsSummary(_ sessions: [ClaudeSession]) -> String {
 
 // ---------- reading sessions from their conversation files ----------
 
+/// How far back Pip keeps a session in view: twelve hours.
+let watchWindow: Double = 12 * 3600
 let projectsFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
 let desktopSessionsFolder = FileManager.default.homeDirectoryForCurrentUser
   .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
@@ -251,7 +268,7 @@ final class SessionScanner {
   private var lastTitleScan = Date.distantPast
   private(set) var titles: [String: String] = [:]
 
-  /// Every session whose conversation saw real activity in the last two
+  /// Every session whose conversation saw real activity in the last twelve
   /// hours. Each file is followed from where Pip last stopped reading, so a
   /// busy session costs only its new lines, however long it has grown.
   func scan() -> [ClaudeSession] {
@@ -263,12 +280,12 @@ final class SessionScanner {
       var state = files[file.path] ?? FileState()
       follow(file, &state)
       files[file.path] = state
-      if let one = session(file, state), one.ageSeconds < 2 * 3600 { result.append(one) }
+      if let one = session(file, state), one.ageSeconds < watchWindow { result.append(one) }
     }
     return result
   }
 
-  /// Conversation files changed in the last two hours.
+  /// Conversation files changed in the last twelve hours.
   private func listRecent(_ now: Date) -> [URL] {
     let fm = FileManager.default
     var out: [URL] = []
@@ -276,7 +293,7 @@ final class SessionScanner {
       for file in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
       where file.pathExtension == "jsonl" {
         if let changed = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-          now.timeIntervalSince(changed) < 2 * 3600
+          now.timeIntervalSince(changed) < watchWindow
         {
           out.append(file)
         }
@@ -304,13 +321,25 @@ final class SessionScanner {
         var entries = lines(data, dropFirst: start > 0)
         if let last = entries.lastIndex(where: { isMessage($0) }) {
           // Older lines may still hold the prompt and the folder.
+          var noted = ""  // Claude's own note of the last prompt: a fallback, as it can lag behind
           for entry in entries[..<last].reversed() {
-            if state.prompt.isEmpty, entry["type"] as? String == "last-prompt", let p = entry["lastPrompt"] as? String { state.prompt = p }
+            if noted.isEmpty, entry["type"] as? String == "last-prompt", let p = entry["lastPrompt"] as? String { noted = p }
+            if state.prompt.isEmpty, isMessage(entry), entry["type"] as? String == "user" {
+              let typed = typedText((entry["message"] as? [String: Any])?["content"])
+              if !typed.isEmpty, !typed.hasPrefix("[Request interrupted") { state.prompt = typed }
+            }
             if state.cwd.isEmpty, let cwd = entry["cwd"] as? String { state.cwd = cwd }
             if state.title.isEmpty, entry["type"] as? String == "custom-title", let t = entry["customTitle"] as? String { state.title = t }
           }
+          // The request itself can be megabytes further back; look once more.
+          if state.prompt.isEmpty, start > 0, chunk < 16 * 1024 * 1024 {
+            state = FileState()
+            chunk *= 4
+            continue
+          }
           entries = Array(entries[last...])
           for entry in entries { apply(entry, &state) }
+          if state.prompt.isEmpty { state.prompt = noted }
           break
         }
         if start == 0 || chunk >= 32 * 1024 * 1024 {
@@ -339,6 +368,14 @@ final class SessionScanner {
     return parts.compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
   }
 
+  /// What the person typed in a message: its first text that isn't a note the
+  /// app added around it (those start with a tag such as <system-reminder>).
+  private func typedText(_ content: Any?) -> String {
+    if let text = content as? String { return text.hasPrefix("<") ? "" : text }
+    let texts = (content as? [[String: Any]] ?? []).compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+    return texts.first { !$0.hasPrefix("<") && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+  }
+
   private func isMessage(_ entry: [String: Any]) -> Bool {
     let type = entry["type"] as? String
     guard type == "user" || type == "assistant" else { return false }
@@ -365,7 +402,7 @@ final class SessionScanner {
     if let cwd = entry["cwd"] as? String { state.cwd = cwd }
     switch type {
     case "last-prompt":
-      if let p = entry["lastPrompt"] as? String { state.prompt = p }
+      if state.prompt.isEmpty, let p = entry["lastPrompt"] as? String { state.prompt = p }
       return
     case "custom-title":
       if let t = entry["customTitle"] as? String { state.title = t }
@@ -385,14 +422,15 @@ final class SessionScanner {
     let content = (entry["message"] as? [String: Any])?["content"]
     let blocks = content as? [[String: Any]] ?? []
     if type == "user" {
-      let typed = (content as? String) ?? blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String ?? ""
+      let typed = typedText(content)
+      let hasText = content is String || blocks.contains { $0["type"] as? String == "text" }
       if blocks.contains(where: { $0["type"] as? String == "tool_result" }) {
         state.kind = "tool-result"
       } else if typed.hasPrefix("[Request interrupted") {
         state.kind = "interrupted"
-      } else if !typed.isEmpty {
+      } else if hasText {
         state.kind = "prompt"
-        if !typed.hasPrefix("<") { state.prompt = typed }
+        if !typed.isEmpty { state.prompt = typed }
       } else {
         return
       }
@@ -442,7 +480,9 @@ final class SessionScanner {
     }
     // Nothing new for a long while in the middle of a task: it ended without
     // a reply, or it is waiting on something Pip can't see.
-    if ["thinking", "working"].contains(one.mood), age > 15 * 60 { (one.mood, one.activity, one.line) = ("idle", "", "Quiet for a while") }
+    // A tool can run for a long time (a build, a helper agent), so a working
+    // session stays working for an hour; a silent "thinking" one for 15 minutes.
+    if age > (one.mood == "working" ? 60 * 60 : one.mood == "thinking" ? 15 * 60 : .infinity) { (one.mood, one.activity, one.line) = ("idle", "", "Quiet for a while") }
     return one
   }
 

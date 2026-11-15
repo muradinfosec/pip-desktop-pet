@@ -1,6 +1,10 @@
 # Pip
 
-A little sprout-headed pet that lives on your Mac desktop. Pip floats above your windows, has moods, reacts when you pat it or carry it around, and talks back when you talk to it.
+A little sprout-headed creature that lives on your Mac desktop. Pip floats above your windows, keeps an eye on your Claude Code sessions, has moods, reacts when you pat it or carry it around, and talks back when you talk to it.
+
+<p align="center"><img src="docs/pip.gif" width="300" alt="Pip says hi and looks around, reads a book, giggles when patted, then celebrates with drifting petals"></p>
+
+Pip isn't a drawing: it's a small 3D creature rendered live on your Mac, with fuzzy peach skin, wet eyes with real eyelids, a damp nose, a leafy sprout that sways, and a soft shadow underneath.
 
 ![Pip saying hello, typing on a laptop, reading a book, celebrating and asleep](docs/pip.png)
 
@@ -61,10 +65,11 @@ Connectors are the ones on your claude.ai account. A connector that shows as nee
 
 ## Watching your Claude Code sessions
 
-Pip sees every Claude Code session on your Mac, in the terminal and in the Claude desktop app, with no setup. It reads the latest lines of each session's conversation in `~/.claude/projects/` and uses the desktop app's session titles. Pip then:
+Pip watches every Claude Code session on your Mac, in the terminal and in the Claude desktop app, all the time and with no setup. It follows each session's conversation in `~/.claude/projects/` as it's written and uses the desktop app's session titles. Pip then:
 
 - shows the busiest session, with its name in the bubble when several are working,
-- lists every session and what it's doing in the menu,
+- tells you when another session finishes or needs you,
+- lists every session from the last 12 hours, and what each is doing, in the menu,
 - can read a session's history when you ask what it's doing.
 
 For one more signal, turn on **Watch All Claude Sessions** in Pip's menu: it adds a small hook to `~/.claude/settings.json` (keeping a backup at `~/.claude/settings.json.pip-backup`) so Pip also knows when a session is waiting for your approval. Turning it off removes the hook.
