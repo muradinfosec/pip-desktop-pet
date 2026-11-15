@@ -3,9 +3,10 @@
   Pip, drawn live. The app loads this page in a transparent window and feeds
   it what Claude is doing; everything Pip does with that is decided here.
 
-  The character is a rig, not a set of pictures: every part (body, eyes, lids,
-  brows, mouth, arms, feet, stem, leaves) is driven by springs toward the pose
-  of the current emotion, with breathing, blinking, gaze, jumping and leaf
+  Pip is a small 3D creature, rendered live: a shader lights and shadows a
+  fuzzy body, wet eyes with lids, a nose and a leafy sprout for every pixel.
+  A rig drives it: every part moves on springs toward the pose of the current
+  emotion, with breathing, blinking, darting eyes, a twitching nose and leaf
   physics layered on top, so no two moments look the same.
 -->
 <html><head><meta charset="utf-8">
@@ -24,13 +25,15 @@
   #bubble .from { font-size: 10.5px; font-weight: 600; color: #A07A63; margin-bottom: 1px; letter-spacing: .1px; }
   #bubble.heard { font-style: italic; color: #3A5FB0; }
   #bubble.pop { transform: scale(1.07); }
-  #stage { display: block; width: 240px; height: 200px; margin-top: -58px; overflow: visible; flex-shrink: 0; }
+  #stage { position: relative; width: 240px; height: 200px; margin-top: -58px; flex-shrink: 0; }
+  #gl, #fx { position: absolute; left: 0; top: 0; width: 240px; height: 200px; }
+  #fx { overflow: visible; pointer-events: none; }
   /* Long answers scroll inside the bubble; the bubble itself never clips, so its tail shows. */
   #bubble .body { max-height: 286px; overflow-y: auto; overscroll-behavior: contain; }
   #bubble .body::-webkit-scrollbar { width: 6px; } #bubble .body::-webkit-scrollbar-thumb { background: #D9CFC6; border-radius: 3px; }
   /* Near the top of the screen the bubble goes under Pip instead. */
   body.below #wrap { flex-direction: column-reverse; justify-content: flex-end; }
-  body.below #stage { margin-top: 0; margin-bottom: -16px; }
+  body.below #stage { margin-top: 0; margin-bottom: -4px; }
   body.below #bubble { margin-bottom: 0; }
   body.below #bubble::after { bottom: auto; top: -6px; border-top: 0; border-bottom: 6px solid rgba(255,255,255,0.96); }
   /* Asking before Pip does something that changes your computer or reaches out. */
@@ -46,114 +49,310 @@
   #stage text { font-family: -apple-system, sans-serif; text-anchor: middle; }
 </style></head>
 <body><div id="wrap"><div id="bubble">Hi, I'm Pip! Press ⌃⌥P to talk to me.</div>
-<svg id="stage" viewBox="0 0 240 200" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <radialGradient id="gBody" cx="0.36" cy="0.27" r="0.92">
-      <stop offset="0" stop-color="#FFD9B4"/><stop offset="0.42" stop-color="#F8AC7C"/>
-      <stop offset="0.82" stop-color="#E88E60"/><stop offset="1" stop-color="#CC7049"/>
-    </radialGradient>
-    <radialGradient id="gBelly" cx="0.5" cy="0.45" r="0.55">
-      <stop offset="0" stop-color="#FFEEDD" stop-opacity="0.95"/><stop offset="1" stop-color="#FFEEDD" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="gLimb" cx="0.4" cy="0.3" r="0.9">
-      <stop offset="0" stop-color="#FBBE93"/><stop offset="1" stop-color="#DD8256"/>
-    </radialGradient>
-    <linearGradient id="gFoot" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#E08A5C"/><stop offset="1" stop-color="#B9603C"/>
-    </linearGradient>
-    <linearGradient id="gLeaf" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#A9DE78"/><stop offset="0.55" stop-color="#6DB54E"/><stop offset="1" stop-color="#3F8A38"/>
-    </linearGradient>
-    <radialGradient id="gEye" cx="0.38" cy="0.3" r="0.85">
-      <stop offset="0" stop-color="#6A4636"/><stop offset="0.55" stop-color="#2E1E18"/><stop offset="1" stop-color="#15100E"/>
-    </radialGradient>
-    <radialGradient id="gShadow"><stop offset="0" stop-color="#000" stop-opacity="0.3"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
-    <radialGradient id="gCheek"><stop offset="0" stop-color="#FF6F86" stop-opacity="0.75"/><stop offset="1" stop-color="#FF6F86" stop-opacity="0"/></radialGradient>
-    <radialGradient id="gGlow"><stop offset="0" stop-color="#E4F1FF" stop-opacity="0.9"/><stop offset="1" stop-color="#E4F1FF" stop-opacity="0"/></radialGradient>
-    <linearGradient id="gScreen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#EEF0F5"/><stop offset="1" stop-color="#C9CED9"/></linearGradient>
-    <clipPath id="clipBody"><path d="M0,-86 C30,-86 47,-66 47,-42 C47,-18 30,-6 0,-6 C-30,-6 -47,-18 -47,-42 C-47,-66 -30,-86 0,-86 Z"/></clipPath>
-    <clipPath id="clipEyeL"><rect id="lidL" x="-10" y="-12" width="20" height="30"/></clipPath>
-    <clipPath id="clipEyeR"><rect id="lidR" x="-10" y="-12" width="20" height="30"/></clipPath>
-  </defs>
+<div id="stage"><canvas id="gl"></canvas>
+<svg id="fx" viewBox="0 0 240 200" xmlns="http://www.w3.org/2000/svg"><g id="fxBack"></g><g id="fxFront"></g></svg></div></div>
 
-  <ellipse id="shadow" cx="120" cy="186" rx="42" ry="6.5" fill="url(#gShadow)"/>
-  <g id="fxBack"></g>
+<!--
+  Pip's body is not a drawing: it is a small 3D scene, lit and shadowed for
+  every pixel by this shader. Shapes are distance functions (a fuzzy round
+  body, feet, arms, wet eyes with lids, a stem with two leaves, and the things
+  Pip holds); the rig below only feeds it numbers.
+-->
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+uniform vec2 uRes;
+uniform vec4 uRoot;   // x, jump height, foot swing, nose twitch
+uniform vec4 uBody;   // cos tilt, sin tilt, scale x, scale y
+uniform vec4 uFace;   // look x, look y, eye scale, blush
+uniform vec4 uLid;    // upper lid, lower lid, curve of the closed line, slant
+uniform vec4 uMouth;  // width, curve, open, roundness
+uniform vec4 uArm;    // cos/sin right arm, cos/sin left arm
+uniform vec4 uFeet;   // dangle, right foot lift
+uniform vec4 uLeafR;  // cos/sin right leaf, cos/sin stem
+uniform vec4 uLeafL;  // cos/sin left leaf
+uniform vec4 uProp;   // laptop, book, magnifying glass, screen glow
 
-  <g id="pip">
-    <g id="footL"><ellipse cx="-17" cy="-3" rx="11.5" ry="6.5" fill="url(#gFoot)"/></g>
-    <g id="footR"><ellipse cx="17" cy="-3" rx="11.5" ry="6.5" fill="url(#gFoot)"/></g>
+const vec3 LKEY = vec3(-0.42, 0.74, 0.52);
 
-    <g id="bodyG">
-      <g id="sprout">
-        <path d="M0,-83 q-1.5,-8 0,-16" stroke="#5B9B46" stroke-width="3.2" fill="none" stroke-linecap="round"/>
-        <g id="leafL"><path d="M0,0 C5,-9 19,-11 27,-3 C19,4 7,5 0,0 Z" fill="url(#gLeaf)"/><path d="M1,0 Q13,-4 25,-3" stroke="#3F8A38" stroke-width="0.9" fill="none" opacity="0.7"/></g>
-        <g id="leafR"><path d="M0,0 C5,-9 19,-11 27,-3 C19,4 7,5 0,0 Z" fill="url(#gLeaf)"/><path d="M1,0 Q13,-4 25,-3" stroke="#3F8A38" stroke-width="0.9" fill="none" opacity="0.7"/></g>
-      </g>
+vec3 srgb(vec3 c) { return pow(c, vec3(2.2)); }
+float hash(vec3 p) { p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3)); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float noise(vec3 x) {
+  vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash(i), hash(i + vec3(1, 0, 0)), f.x), mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
+             mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x), mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+vec2 rot(vec2 v, vec2 cs) { return vec2(v.x * cs.x - v.y * cs.y, v.x * cs.y + v.y * cs.x); }
+float sdEll(vec3 p, vec3 r) { float k0 = length(p / r); float k1 = length(p / (r * r)) + 1e-5; return k0 * (k0 - 1.0) / k1; }
+float sdBox(vec3 p, vec3 b, float r) { vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }
+float sdCap(vec3 p, vec3 a, vec3 b, float r) { vec3 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h) - r; }
+float smin(float a, float b, float k) { float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
+vec2 opU(vec2 a, vec2 b) { return a.x < b.x ? a : b; }
 
-      <path d="M0,-86 C30,-86 47,-66 47,-42 C47,-18 30,-6 0,-6 C-30,-6 -47,-18 -47,-42 C-47,-66 -30,-86 0,-86 Z"
-            fill="url(#gBody)" stroke="#B9643F" stroke-width="1.8"/>
-      <g clip-path="url(#clipBody)">
-        <ellipse cx="0" cy="-27" rx="29" ry="21" fill="url(#gBelly)"/>
-        <ellipse cx="0" cy="-3" rx="42" ry="11" fill="#7A3418" opacity="0.2"/>
-        <ellipse cx="-18" cy="-69" rx="13" ry="6.5" fill="#fff" opacity="0.3" transform="rotate(-30 -18 -69)"/>
-        <g fill="#B9643F" opacity="0.16">
-          <circle cx="24" cy="-70" r="1"/><circle cx="31" cy="-62" r="0.8"/><circle cx="19" cy="-76" r="0.7"/>
-          <circle cx="-33" cy="-52" r="0.8"/><circle cx="35" cy="-50" r="0.9"/><circle cx="-28" cy="-62" r="0.7"/>
-        </g>
-        <ellipse id="glow" cx="0" cy="-22" rx="40" ry="30" fill="url(#gGlow)" opacity="0"/>
-      </g>
+// How far the body's front surface is from its middle at (x, y).
+float surfZ(vec2 q) { return 40.0 * sqrt(max(0.04, 1.0 - q.x * q.x / 2209.0 - (q.y - 46.0) * (q.y - 46.0) / 1600.0)); }
+vec3 toBody(vec3 pw) { vec3 p = pw - vec3(uRoot.x, uRoot.y, 0.0); p.xy = rot(p.xy, uBody.xy); return p / vec3(uBody.z, uBody.w, uBody.z); }
+vec2 faceOff() { return vec2(uFace.x * 3.2, -uFace.y * 2.2); }
+vec3 eyeC(float side) {
+  vec3 c = vec3(side * 15.0 + uFace.x * 5.4, 52.0 - uFace.y * 4.0, 0.0);
+  c.z = surfZ(c.xy) - 2.6 * uFace.z;
+  return c;
+}
+vec2 armC(float side) { return side > 0.0 ? vec2(41.0, 40.0) + rot(vec2(0.0, -9.0), uArm.xy) : vec2(-41.0, 40.0) + rot(vec2(0.0, -9.0), uArm.zw); }
+vec3 stemSpace(vec3 b) { vec3 s = b; s.xy = vec2(0.0, 83.0) + rot(b.xy - vec2(0.0, 83.0), uLeafR.zw); return s; }
+vec3 leafR(vec3 s) { return vec3(rot(s.xy - vec2(-0.8, 99.0), vec2(uLeafR.x, -uLeafR.y)), s.z - 1.5); }
+vec3 leafL(vec3 s) { return vec3(rot(vec2(-(s.x + 0.8), s.y - 99.0) / 0.92, vec2(uLeafL.x, -uLeafL.y)), (s.z - 1.5) / 0.92); }
+vec3 leafBend(vec3 q) { q.y -= 0.016 * q.x * (27.0 - q.x); q.z -= 0.007 * q.x * (27.0 - q.x); return q; }
+float leaf(vec3 q) {
+  float u = (q.x - 13.5) / 13.5;
+  q = leafBend(q);
+  float d = max(max(abs(q.y) - 5.6 * (1.0 - u * u), abs(q.z) - 0.55), abs(q.x - 13.5) - 13.5);
+  return d * 0.55;
+}
 
-      <g id="armL"><ellipse cx="0" cy="9" rx="6.5" ry="11" fill="url(#gLimb)" stroke="#B9643F" stroke-width="1.4"/></g>
-      <g id="armR"><ellipse cx="0" cy="9" rx="6.5" ry="11" fill="url(#gLimb)" stroke="#B9643F" stroke-width="1.4"/>
-        <g id="lens" opacity="0"><path d="M0,17 L0,27" stroke="#7A5A3A" stroke-width="3.2" stroke-linecap="round"/>
-          <circle cx="0" cy="36" r="9.5" fill="#BFE3FF" fill-opacity="0.4" stroke="#7A5A3A" stroke-width="2.6"/>
-          <path d="M-5,32 q2,-4 6,-4" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" opacity="0.9"/></g>
-      </g>
+vec2 map(vec3 pw) {
+  vec3 p = pw - vec3(uRoot.x, uRoot.y, 0.0);
+  vec3 b = p; b.xy = rot(b.xy, uBody.xy); b /= vec3(uBody.z, uBody.w, uBody.z);
+  float sc = min(uBody.z, uBody.w);
 
-      <g id="face">
-        <circle id="cheekL" cx="-28" cy="-37" r="9" fill="url(#gCheek)"/>
-        <circle id="cheekR" cx="28" cy="-37" r="9" fill="url(#gCheek)"/>
+  // body and arms, melted into one skin
+  float dBody = sdEll(b - vec3(0.0, 46.0, 0.0), vec3(47.0, 40.0, 40.0));
+  dBody += 3.2 * exp(-dot(b.xz, b.xz) / 110.0) * smoothstep(62.0, 86.0, b.y);  // the dimple the sprout grows from
+  dBody += (noise(b * 0.04 + 5.0) - 0.5) * 2.4;                                 // nothing that grows is a perfect ball
+  vec2 cR = armC(1.0), cL = armC(-1.0);
+  vec3 qR = vec3(rot(b.xy - cR, vec2(uArm.x, -uArm.y)), b.z - surfZ(cR) + 1.0);
+  vec3 qL = vec3(rot(b.xy - cL, vec2(uArm.z, -uArm.w)), b.z - surfZ(cL) + 1.0);
+  float dArm = min(sdEll(qR, vec3(6.5, 11.0, 6.0)), sdEll(qL, vec3(6.5, 11.0, 6.0)));
+  vec2 res = vec2(smin(dBody, dArm, 3.5) * sc, 1.0);
 
-        <g id="eyeL">
-          <g id="eyeLopen"><g clip-path="url(#clipEyeL)"><g id="eyeLball">
-            <ellipse rx="6.4" ry="8.4" fill="url(#gEye)"/>
-            <circle cx="2.2" cy="-3.2" r="2.2" fill="#fff"/><circle cx="-2.1" cy="3.2" r="1.05" fill="#fff" opacity="0.55"/>
-          </g></g><path id="lidLineL" stroke="#2B2422" stroke-width="2" fill="none" stroke-linecap="round"/></g>
-          <path id="eyeLhappy" d="M-7,3 Q0,-7 7,3" stroke="#2B2422" stroke-width="2.8" fill="none" stroke-linecap="round"/>
-          <path id="eyeLclosed" d="M-7,0 Q0,5.5 7,0" stroke="#2B2422" stroke-width="2.6" fill="none" stroke-linecap="round"/>
-          <path id="eyeLsqueeze" d="M-5,-4.5 L4.5,0 L-5,4.5" stroke="#2B2422" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-        </g>
-        <g id="eyeR">
-          <g id="eyeRopen"><g clip-path="url(#clipEyeR)"><g id="eyeRball">
-            <ellipse rx="6.4" ry="8.4" fill="url(#gEye)"/>
-            <circle cx="2.2" cy="-3.2" r="2.2" fill="#fff"/><circle cx="-2.1" cy="3.2" r="1.05" fill="#fff" opacity="0.55"/>
-          </g></g><path id="lidLineR" stroke="#2B2422" stroke-width="2" fill="none" stroke-linecap="round"/></g>
-          <path id="eyeRhappy" d="M-7,3 Q0,-7 7,3" stroke="#2B2422" stroke-width="2.8" fill="none" stroke-linecap="round"/>
-          <path id="eyeRclosed" d="M-7,0 Q0,5.5 7,0" stroke="#2B2422" stroke-width="2.6" fill="none" stroke-linecap="round"/>
-          <path id="eyeRsqueeze" d="M5,-4.5 L-4.5,0 L5,4.5" stroke="#2B2422" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-        </g>
+  // feet stay on the ground while the body leans
+  float dFeet = min(sdEll(p - vec3(-17.0 + uRoot.z, 3.5 - uFeet.x, 9.0), vec3(11.5, 6.5, 10.0)),
+                    sdEll(p - vec3(17.0 + uRoot.z, 3.5 - uFeet.x + uFeet.y, 9.0), vec3(11.5, 6.5, 10.0)));
+  res = opU(res, vec2(dFeet, 2.0));
 
-        <path id="browL" d="M-6,0 Q0,-1.6 6,0" stroke="#8A4A2E" stroke-width="2.2" fill="none" stroke-linecap="round"/>
-        <path id="browR" d="M-6,0 Q0,-1.6 6,0" stroke="#8A4A2E" stroke-width="2.2" fill="none" stroke-linecap="round"/>
-        <path id="mouth" fill="#8A2F33" stroke="#2B2422" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round"/>
-      </g>
-    </g>
+  // eyes
+  vec3 er = vec3(6.4, 8.4, 5.6) * uFace.z;
+  res = opU(res, vec2(min(sdEll(b - eyeC(-1.0), er), sdEll(b - eyeC(1.0), er)) * sc, 3.0));
 
-    <g id="laptop" opacity="0">
-      <rect x="-27" y="-31" width="54" height="26" rx="4" fill="url(#gScreen)" stroke="#9AA1AF" stroke-width="1.4"/>
-      <path d="M0,-19 C2,-23 7,-24 9,-21 C7,-18 3,-17 0,-19 Z M0,-19 C-2,-23 -7,-24 -9,-21 C-7,-18 -3,-17 0,-19 Z" fill="#9AA1AF"/>
-      <path d="M-33,-5 L33,-5 L37,0 L-37,0 Z" fill="#C4C9D4" stroke="#9AA1AF" stroke-width="1.2" stroke-linejoin="round"/>
-    </g>
-    <g id="book" opacity="0">
-      <path d="M0,-8 L-26,-12 L-26,-33 L0,-28 Z" fill="#5B8DEF" stroke="#3A5FB0" stroke-width="1.4" stroke-linejoin="round"/>
-      <path d="M0,-8 L26,-12 L26,-33 L0,-28 Z" fill="#6B9BF5" stroke="#3A5FB0" stroke-width="1.4" stroke-linejoin="round"/>
-      <path d="M-25,-34 L0,-29.5 L25,-34" stroke="#FFF6E6" stroke-width="2" fill="none" stroke-linecap="round"/>
-      <path d="M13,-21 C15,-25 20,-25 21,-22 C19,-19 15,-19 13,-21 Z" fill="#fff" opacity="0.7"/>
-    </g>
-  </g>
+  // the sprout
+  vec3 s = stemSpace(b);
+  float dPlant = min(sdCap(s, vec3(0.0, 79.0, 0.0), vec3(-0.8, 99.0, 1.5), 1.6), min(leaf(leafR(s)), leaf(leafL(s)) * 0.92));
+  res = opU(res, vec2(dPlant * sc, 4.0));
 
-  <g id="fxFront"></g>
-</svg></div>
+  // what Pip holds
+  if (uProp.x > 0.02) {
+    float k = uProp.x; vec3 q = (p - vec3(0.0, 0.0, 47.0)) / k;
+    vec3 qs = q - vec3(0.0, 17.0, 0.0); qs.yz = vec2(qs.y * 0.98 - qs.z * 0.199, qs.y * 0.199 + qs.z * 0.98);
+    float d = min(sdBox(qs, vec3(27.0, 13.0, 0.9), 1.2), sdBox(q - vec3(0.0, 1.4, -9.0), vec3(34.0, 1.3, 9.5), 1.0));
+    res = opU(res, vec2(d * k, 5.0));
+  }
+  if (uProp.y > 0.02) {
+    float k = uProp.y; vec3 q = (p - vec3(0.0, 19.0, 51.0)) / k; q.x = abs(q.x);
+    vec3 l = vec3(q.x * 0.9 - q.z * 0.435 - 12.5, q.y, q.x * 0.435 + q.z * 0.9);
+    res = opU(res, vec2(sdBox(l, vec3(12.5, 11.0, 1.0), 0.8) * k, 6.0));
+  }
+  if (uProp.z > 0.02) {
+    float k = uProp.z; vec2 dir = rot(vec2(0.0, -1.0), uArm.xy);
+    vec3 q = vec3(b.xy - (vec2(41.0, 40.0) + dir * 19.0), b.z - surfZ(cR) - 3.0);
+    vec3 qc = q - vec3(dir * 19.5 * k, 0.0);
+    float d = min(sdCap(q, vec3(0.0), vec3(dir * 10.0 * k, 0.0), 1.5 * k), length(vec2(length(qc.xy) - 9.5 * k, qc.z)) - 1.3 * k);
+    res = opU(res, vec2(d * sc, 7.0));
+  }
+  return res;
+}
+
+vec3 calcN(vec3 p) {
+  const vec2 e = vec2(0.35, -0.35);
+  return normalize(e.xyy * map(p + e.xyy).x + e.yyx * map(p + e.yyx).x + e.yxy * map(p + e.yxy).x + e.xxx * map(p + e.xxx).x);
+}
+float softShadow(vec3 ro, vec3 rd) {
+  float res = 1.0, t = 1.5;
+  for (int i = 0; i < 14; i++) {
+    float h = map(ro + rd * t).x;
+    res = min(res, 7.0 * h / t);
+    t += clamp(h, 1.5, 9.0);
+    if (res < 0.02 || t > 90.0) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+float calcAO(vec3 p, vec3 n) {
+  float o = 0.0, s = 1.0;
+  for (int i = 0; i < 4; i++) { float h = 1.5 + 3.5 * float(i); o += (h - map(p + n * h).x) * s; s *= 0.6; }
+  return clamp(1.0 - 0.06 * o, 0.0, 1.0);
+}
+
+vec3 shade(vec3 pw, vec3 n, float id, vec3 rd) {
+  vec3 L = normalize(LKEY), V = -rd;
+  vec3 b = toBody(pw);
+  vec3 sky = vec3(0.62, 0.70, 0.82);
+
+  vec3 alb = vec3(0.5), add = vec3(0.0);
+  float specAmt = 0.04, gloss = 20.0, fuzz = 0.0, sss = 0.0, wrapK = 0.15;
+
+  if (id < 1.5) {
+    // peach skin: warm, mottled, fuzzy, with a paler belly
+    float n1 = noise(b * 0.045 + 3.1), n2 = noise(b * 0.9), n3 = noise(b * 2.6);
+    alb = mix(srgb(vec3(0.98, 0.76, 0.44)), srgb(vec3(0.94, 0.55, 0.31)), smoothstep(0.25, 0.75, n1));
+    // the red flush of the side that saw the sun, and fine streaks through it
+    vec3 flush = srgb(vec3(0.80, 0.26, 0.20));
+    alb = mix(alb, flush, 0.6 * smoothstep(0.45, 0.8, noise(b * 0.03 + 11.0)) * smoothstep(10.0, 60.0, b.y));
+    alb = mix(alb, flush, 0.14 * smoothstep(0.6, 0.9, noise(vec3(b.x * 0.5, b.y * 0.08, b.z * 0.5))));
+    float front = step(0.0, b.z);
+    float belly = smoothstep(1.0, 0.35, length((b.xy - vec2(0.0, 27.0)) / vec2(31.0, 23.0))) * front;
+    alb = mix(alb, srgb(vec3(1.0, 0.86, 0.70)), belly * 0.75);
+    alb *= 0.9 + 0.2 * n2;
+    alb = mix(alb, alb * 0.72, smoothstep(0.80, 0.9, n3) * 0.5);
+    fuzz = 1.0; sss = 1.0; wrapK = 0.4;
+
+    vec2 fo = faceOff();
+    float ck = (smoothstep(11.0, 3.0, length(b.xy - vec2(-28.0, 37.0) - fo)) + smoothstep(11.0, 3.0, length(b.xy - vec2(28.0, 37.0) - fo))) * uFace.w * front;
+    alb = mix(alb, srgb(vec3(0.93, 0.36, 0.34)), ck * 0.55);
+
+    // mouth: a soft crease that opens into a small dark cavity
+    vec2 mp = b.xy - vec2(0.0, 31.5) - fo;
+    float w = max(uMouth.x, 2.0), c = uMouth.y, o = uMouth.z;
+    float cy = c * 0.35, xx = clamp(mp.x / w, -1.0, 1.0), par = 1.0 - xx * xx;
+    float yT = cy + (-(c - o * 6.0 * uMouth.w) - cy) * par;
+    float yB = cy + (-(c + o * 10.0) - cy) * par;
+    float inX = smoothstep(w + 0.9, w - 0.4, abs(mp.x));
+    float cav = smoothstep(yB - 0.5, yB + 0.5, mp.y) * smoothstep(yT + 0.5, yT - 0.5, mp.y) * inX * smoothstep(0.03, 0.12, o) * front;
+    float ln = smoothstep(1.25, 0.35, min(abs(mp.y - yT), abs(mp.y - yB))) * inX * front;
+    vec3 crease = srgb(vec3(0.33, 0.15, 0.10));
+    float ph = smoothstep(0.9, 0.2, abs(mp.x)) * smoothstep(-0.5, 1.0, mp.y - yT) * smoothstep(9.0, 7.5, mp.y) * front;
+    alb = mix(alb, crease, max(ln * 0.85, ph * 0.5));
+    vec3 cavCol = mix(srgb(vec3(0.80, 0.36, 0.38)), srgb(vec3(0.25, 0.06, 0.07)), smoothstep(0.25, 0.6, (mp.y - yB) / max(yT - yB, 0.01)));
+    alb = mix(alb, cavCol, cav);
+
+    // a small damp nose
+    vec2 np = b.xy - vec2(0.0, 41.5 + uRoot.w) - fo;
+    float nm = smoothstep(1.15, 0.8, length(np / vec2(3.6, 2.5))) * front;
+    alb = mix(alb, srgb(vec3(0.42, 0.20, 0.17)), nm);
+    specAmt = mix(specAmt, 0.6, nm); gloss = mix(gloss, 90.0, nm); fuzz *= 1.0 - max(nm, cav);
+  } else if (id < 2.5) {
+    alb = srgb(vec3(0.78, 0.44, 0.27)) * (0.9 + 0.2 * noise(pw * 0.9));
+    fuzz = 0.5; sss = 0.6; wrapK = 0.35;
+  } else if (id < 3.5) {
+    // an eye: dark and wet, under lids of the same skin
+    float side = b.x < 0.0 ? -1.0 : 1.0;
+    vec3 ec = eyeC(side);
+    float xn = (b.x - ec.x) / (6.4 * uFace.z), yn = (b.y - ec.y) / (8.4 * uFace.z);
+    float open = clamp((uLid.x - uLid.y) * 0.5, 0.0, 1.0), cur = uLid.z * (1.0 - open);
+    float top = uLid.x + cur * xn * xn + uLid.w * xn * side;
+    float bot = uLid.y + cur * xn * xn;
+    float vis = smoothstep(0.0, 0.12, top - yn) * smoothstep(0.0, 0.12, yn - bot);
+    float lash = smoothstep(0.20, 0.05, abs(yn - top)) * 0.9 + smoothstep(0.14, 0.04, abs(yn - bot)) * 0.5;
+
+    vec2 g = vec2(xn, yn) - vec2(uFace.x * 0.22, -uFace.y * 0.18);
+    float rr = length(g * vec2(1.0, 1.25));
+    vec3 iris = mix(srgb(vec3(0.30, 0.17, 0.09)), srgb(vec3(0.10, 0.06, 0.04)), smoothstep(0.35, 0.95, rr));
+    iris *= 0.8 + 0.4 * noise(vec3(atan(g.y, g.x) * 6.0, rr * 8.0, 1.0));
+    vec3 eyeCol = mix(vec3(0.004), iris, smoothstep(0.30, 0.42, rr));
+    eyeCol *= mix(0.45, 1.0, smoothstep(0.0, 0.6, top - yn));
+
+    vec3 R = reflect(rd, n);
+    float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 5.0);
+    vec3 refl = mix(vec3(0.05), sky * 1.2, smoothstep(-0.2, 0.8, R.y)) * fres * 0.8;
+    refl += vec3(1.0) * smoothstep(0.93, 0.975, dot(R, normalize(vec3(-0.45, 0.62, 0.64)))) * 0.95;
+    refl += vec3(1.0) * smoothstep(0.985, 0.995, dot(R, normalize(vec3(0.5, -0.25, 0.83)))) * 0.25;
+
+    vec3 lidCol = srgb(vec3(0.90, 0.56, 0.34)) * (0.9 + 0.2 * noise(b * 0.9));
+    alb = mix(lidCol, eyeCol, vis) * (1.0 - lash * 0.8);
+    add = refl * vis;
+    specAmt = mix(0.04, 1.0, vis); gloss = mix(20.0, 200.0, vis);
+    fuzz = 0.3 * (1.0 - vis); sss = 1.0 - vis; wrapK = mix(0.4, 0.1, vis);
+  } else if (id < 4.5) {
+    // stem and leaves: veined, a little glossy, and light shines through
+    vec3 s = stemSpace(b);
+    vec3 a = leafR(s), c2 = leafL(s);
+    vec3 q = leafBend(leaf(a) < leaf(c2) ? a : c2);
+    float isLeaf = step(min(leaf(a), leaf(c2)), sdCap(s, vec3(0.0, 79.0, 0.0), vec3(-0.8, 99.0, 1.5), 1.6));
+    vec3 leafCol = mix(srgb(vec3(0.25, 0.50, 0.16)), srgb(vec3(0.48, 0.72, 0.26)), clamp(q.x / 27.0, 0.0, 1.0));
+    leafCol = mix(leafCol, srgb(vec3(0.62, 0.80, 0.40)), smoothstep(0.9, 0.2, abs(q.y)) * 0.5);
+    leafCol *= 1.0 - 0.14 * smoothstep(0.86, 1.0, sin(q.x * 1.5 - abs(q.y) * 1.3) * 0.5 + 0.5);
+    leafCol *= 0.88 + 0.24 * noise(pw * 1.3);
+    alb = mix(srgb(vec3(0.42, 0.60, 0.25)), leafCol, isLeaf);
+    specAmt = 0.22; gloss = 36.0;
+    add = alb * vec3(1.0, 0.95, 0.86) * clamp(-dot(n, L), 0.0, 1.0) * 0.7 * isLeaf;
+  } else if (id < 5.5) {
+    alb = srgb(vec3(0.80, 0.82, 0.86));
+    vec3 p = pw - vec3(uRoot.x, uRoot.y, 0.0);
+    alb = mix(alb, srgb(vec3(0.62, 0.64, 0.68)), smoothstep(4.6, 3.8, length(p.xy - vec2(0.0, 17.0) * uProp.x)) * step(40.0, p.z));
+    specAmt = 0.5; gloss = 60.0;
+  } else if (id < 6.5) {
+    alb = n.y > 0.6 ? srgb(vec3(0.96, 0.93, 0.85)) : srgb(vec3(0.16, 0.30, 0.50)) * (0.85 + 0.3 * noise(pw * 1.5));
+    specAmt = 0.08;
+  } else {
+    alb = srgb(vec3(0.72, 0.56, 0.26));
+    specAmt = 0.8; gloss = 80.0;
+    add = sky * 0.25 * pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 3.0);
+  }
+
+  float sh = softShadow(pw + n * 1.2, L), ao = calcAO(pw, n), ndl = dot(n, L);
+  if (fuzz > 0.0) n = normalize(n + (vec3(noise(b * 1.3), noise(b * 1.3 + 7.0), noise(b * 1.3 + 13.0)) - 0.5) * 0.12 * fuzz);
+  vec3 key = vec3(1.0, 0.95, 0.86) * 1.25;
+  vec3 amb = mix(vec3(0.55, 0.42, 0.30), sky, n.y * 0.5 + 0.5) * 0.55 * ao;
+  float wrap = clamp((ndl + wrapK) / (1.0 + wrapK), 0.0, 1.0);
+  float sp = pow(clamp(dot(n, normalize(L + V)), 0.0, 1.0), gloss) * specAmt * sh;
+  float rim = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 2.2);
+
+  vec3 col = alb * (key * wrap * mix(0.3, 1.0, sh) + amb);
+  col += alb * srgb(vec3(0.95, 0.32, 0.18)) * 0.9 * sss * pow(clamp(1.0 - abs(ndl), 0.0, 1.0), 2.0);
+  col += vec3(1.0, 0.94, 0.86) * rim * 0.38 * fuzz * (0.4 + 0.6 * wrap);
+  col += key * sp + add;
+  if (uProp.w > 0.01) {
+    vec3 ld = vec3(uRoot.x, uRoot.y + 22.0, 34.0) - pw;
+    col += alb * srgb(vec3(0.70, 0.82, 1.0)) * uProp.w * 2.2 * clamp(dot(n, normalize(ld)), 0.0, 1.0) / (1.0 + dot(ld, ld) * 0.0016);
+  }
+  return col;
+}
+
+void main() {
+  vec2 fc = gl_FragCoord.xy / uRes;
+  // looking at Pip from the front, a little from above
+  vec3 rd = vec3(0.0, -0.1692, -0.9856), up = vec3(0.0, 0.9856, -0.1692);
+  vec3 ro = vec3((fc.x - 0.5) * 240.0, 0.0, 0.0) + up * (fc.y * 200.0 - 16.0) - rd * 240.0;
+
+  bool hit = false;
+  float t = 0.0, dBest = 1e5, tBest = 0.0, idBest = 0.0, idHit = 0.0;
+  vec3 oc = ro - vec3(uRoot.x, 52.0 + uRoot.y, 8.0);
+  float bq = dot(oc, rd), h = bq * bq - (dot(oc, oc) - 98.0 * 98.0);
+  if (h > 0.0) {
+    float t1 = -bq + sqrt(h);
+    t = -bq - sqrt(h);
+    for (int i = 0; i < 70; i++) {
+      vec2 m = map(ro + rd * t);
+      if (m.x < dBest) { dBest = m.x; tBest = t; idBest = m.y; }
+      if (m.x < 0.15) { hit = true; idHit = m.y; break; }
+      t += m.x * 0.85;
+      if (t > t1) break;
+    }
+  }
+
+  // the soft shadow Pip casts on whatever it stands on
+  float sa = 0.0;
+  vec3 g = ro + rd * (ro.y / -rd.y);
+  if (abs(g.z) < 75.0 && abs(g.x - uRoot.x) < 85.0) {
+    vec3 L = normalize(LKEY), dirS = vec3(0.55 * L.x / L.y, 1.0, 0.55 * L.z / L.y);
+    float o = 0.0;
+    for (int i = 0; i < 5; i++) { float hh = 3.0 + 7.0 * float(i); o += clamp(1.0 - map(g + dirS * hh).x / (hh * 0.9), 0.0, 1.0) * (0.34 - 0.05 * float(i)); }
+    sa = clamp(o, 0.0, 1.0) * 0.42 * smoothstep(85.0, 50.0, abs(g.x - uRoot.x)) * smoothstep(75.0, 45.0, abs(g.z));
+  }
+
+  vec4 c = vec4(0.0, 0.0, 0.0, sa);
+  if (hit || dBest < 1.6) {
+    vec3 p = ro + rd * (hit ? t : tBest);
+    float id = hit ? idHit : idBest;
+    float a = 1.0;
+    if (!hit) {
+      // the edge: soft everywhere, and downy on the skin
+      a = 1.0 - smoothstep(0.1, id < 2.5 ? 1.5 : 0.7, dBest);
+      if (id < 2.5) a *= 0.5 + 0.5 * noise(p * 2.2);
+    }
+    vec3 col = pow(clamp(shade(p, calcN(p), id, rd), 0.0, 1.0), vec3(1.0 / 2.2));
+    c = vec4(col * a, a + sa * (1.0 - a));
+  }
+  gl_FragColor = c;
+}
+</script>
 
 <script>
 'use strict'
@@ -223,40 +422,35 @@ let leafA = [0, 0], leafV = [0, 0], stemA = 0, stemV = 0
 let shakeX = 0
 
 function land(impact) {
-  sqVel -= clamp(impact * 0.012, 0, 4.5)
+  sqVel -= clamp(impact * 0.008, 0, 2.6)
   leafV[0] -= impact * 0.3; leafV[1] -= impact * 0.3
   if (impact > 150) for (const side of [-1, 1])
     emit('dust', { x: 120 + side * 26, y: 182, vx: side * rand(30, 55), vy: -rand(6, 16), s0: 0.5, s1: 1.7, max: 0.5, back: true })
 }
 
-// ---------- particles ----------
+// ---------- small natural things in the air ----------
+// Nothing cartoonish floats around Pip: only what a real creature would
+// stir up. Petals drift down when it is happy, a little down fluffs up when
+// it is patted, and dust puffs when it lands.
 const NS = 'http://www.w3.org/2000/svg'
 const parts = []
 const SHAPES = {
-  heart: ['path', { d: 'M0,5 C-9,-2 -5,-9 0,-4 C5,-9 9,-2 0,5 Z', fill: '#F2667F' }],
-  spark: ['path', { d: 'M0,-7 L2,-2 L7,0 L2,2 L0,7 L-2,2 L-7,0 L-2,-2 Z', fill: '#F5C542' }],
-  sweat: ['path', { d: 'M0,-6 Q-5,2 0,5 Q5,2 0,-6 Z', fill: '#7FC3F0' }],
+  petal: ['path', { d: 'M0,-5 C4,-3 4,3 0,5 C-4,3 -4,-3 0,-5 Z' }],
+  mote: ['circle', { r: 1.6, fill: '#FFFDF6' }],
   dust: ['circle', { r: 5, fill: '#CDBBA9' }],
-  dot: ['circle', { r: 4, fill: '#A9A9B8' }],
-  wave: ['path', { d: 'M0,-9 Q7,0 0,9', stroke: '#5B8DEF', 'stroke-width': 3, fill: 'none', 'stroke-linecap': 'round' }],
-  plane: ['path', { d: 'M-10,1 L10,-6 L2,7 L-1,2 Z', fill: '#fff', stroke: '#8C8C99', 'stroke-width': 1.2, 'stroke-linejoin': 'round' }],
-  confetti: ['rect', { x: -2.5, y: -4, width: 5, height: 8, rx: 1.5 }],
-  z: ['text', { 'font-size': 15, 'font-weight': 700, fill: '#8C8C99' }, 'z'],
-  note: ['text', { 'font-size': 17, 'font-weight': 700, fill: '#5B8DEF' }, '♪'],
-  q: ['text', { 'font-size': 26, 'font-weight': 800, fill: '#5B8DEF' }, '?'],
-  bang: ['text', { 'font-size': 26, 'font-weight': 800, fill: '#F2667F' }, '!'],
-  idea: ['text', { 'font-size': 20 }, '💡'],
 }
-const CONFETTI = ['#F2667F', '#5B8DEF', '#F5C542', '#7BB662', '#B07CE8', '#F2A57A']
+const ALIAS = { confetti: 'petal', heart: 'mote' }
+const PETALS = ['#F7C6D0', '#FBE3E8', '#FFFFFF', '#F3B8C6', '#CFE8B0']
 
 function emit(kind, o) {
-  if (parts.length > 48) return
-  const [tag, attrs, text] = SHAPES[kind]
+  kind = ALIAS[kind] || kind
+  if (!SHAPES[kind] || parts.length > 40) return
+  const [tag, attrs] = SHAPES[kind]
   const el = document.createElementNS(NS, tag)
   for (const k in attrs) el.setAttribute(k, attrs[k])
-  if (text) el.textContent = text
-  if (kind === 'confetti') el.setAttribute('fill', pick(CONFETTI))
-  const p = Object.assign({ el, x: 120, y: 100, vx: 0, vy: 0, g: 0, life: 0, max: 1.5, rot: 0, vr: 0, s0: 1, s1: 1, flip: 1, alpha: 1 }, o)
+  if (kind === 'petal') el.setAttribute('fill', pick(PETALS))
+  const p = Object.assign({ el, x: 120, y: 100, vx: 0, vy: 0, g: 0, life: 0, max: 1.5, rot: 0, vr: 0, s0: 1, s1: 1, flip: 1, alpha: 1, sway: 0 }, o)
+  if (kind === 'dust') p.alpha = 0.45
   ;(p.back ? $('fxBack') : $('fxFront')).appendChild(el)
   parts.push(p)
 }
@@ -267,27 +461,30 @@ function stepParticles(dt) {
     const p = parts[i]
     p.life += dt
     if (p.life >= p.max) { p.el.remove(); parts.splice(i, 1); continue }
-    p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt
+    p.vy += p.g * dt
+    p.x += (p.vx + p.sway * Math.sin(p.life * 3 + p.rot)) * dt
+    p.y += p.vy * dt; p.rot += p.vr * dt
     const u = p.life / p.max, s = lerp(p.s0, p.s1, u)
     p.el.setAttribute('transform', `translate(${p.x.toFixed(1)},${p.y.toFixed(1)}) rotate(${p.rot.toFixed(1)}) scale(${(s * p.flip).toFixed(3)},${s.toFixed(3)})`)
     p.el.setAttribute('opacity', (Math.min(1, u / 0.15) * Math.min(1, (1 - u) / 0.35) * p.alpha).toFixed(2))
   }
 }
-const hearts = n => burst('heart', n, () => ({ x: 120 + rand(-30, 30), y: rand(92, 112), vx: rand(-10, 10), vy: -rand(26, 42), s0: 0.6, s1: 1.2, max: rand(1.2, 1.8), rot: rand(-15, 15) }))
-const confetti = n => burst('confetti', n, () => ({ x: 120 + rand(-12, 12), y: 108, vx: rand(-120, 120), vy: -rand(110, 250), g: 430, vr: rand(-420, 420), rot: rand(0, 360), max: rand(1.2, 1.7) }))
+// A puff of down from a pat, and petals drifting down when Pip is glad.
+const hearts = n => burst('mote', n * 2, () => ({ x: 120 + rand(-34, 34), y: rand(96, 120), vx: rand(-8, 8), vy: -rand(8, 20), sway: 10, s0: 0.7, s1: 1.3, max: rand(1.6, 2.6), alpha: 0.8 }))
+const confetti = n => burst('petal', Math.ceil(n * 0.6), () => ({ x: 120 + rand(-70, 70), y: rand(20, 60), vx: rand(-10, 10), vy: rand(14, 30), g: 14, sway: 22, vr: rand(-140, 140), rot: rand(0, 360), s0: 0.8, s1: 0.9, max: rand(2.6, 3.8) }))
 
 // ---------- scripted actions: short moves layered over the emotion ----------
 let action = null
 const once = (a, key, u, at) => (u >= at && !a.fired[key] ? (a.fired[key] = 1) : 0)
 const ACT = {
-  hop: { dur: 0.55, start() { vy = 200 } },
+  hop: { dur: 0.55, start() { vy = 150 } },
   celebrate: {
     dur: 2.4,
-    start() { vy = 270; confetti(16) },
+    start() { vy = 185; confetti(14) },
     tick(u, T, A, a) {
-      if (once(a, 'h2', u, 0.34)) { vy = 240; confetti(8) }
-      if (once(a, 'h3', u, 0.66)) vy = 190
-      T.armL = T.armR = 150; A.armL = A.armR = 12 * Math.sin(t * 16)
+      if (once(a, 'h2', u, 0.4)) vy = 140
+      T.happy = Math.max(T.happy, 0.6)
+      T.armL = T.armR = 130; A.armL = A.armR = 8 * Math.sin(t * 11)
     },
   },
   yawn: {
@@ -318,7 +515,7 @@ const ACT = {
   wave: { dur: 1.5, tick(u, T, A) { T.armR = 150; A.armR = 22 * Math.sin(u * 10 * Math.PI) * plateau(u); T.tilt -= 4 * bell(u) } },
   wake: {
     dur: 1.1,
-    start() { vy = 170; leafV[0] += 220; leafV[1] += 220; emit('bang', { x: 152, y: 96, vy: -16, s0: 0.6, s1: 1.1, max: 0.9 }) },
+    start() { vy = 115; leafV[0] += 220; leafV[1] += 220; emit('bang', { x: 152, y: 96, vy: -16, s0: 0.6, s1: 1.1, max: 0.9 }) },
     tick(u, T) { const k = 1 - u; T.eye = lerp(T.eye, 1.25, k); T.brow = 1; T.browY = lerp(T.browY, -4.5, k); T.closed = 0 },
   },
   glance: { dur: 1.6, tick(u, T, A, a) { const k = plateau(u); T.lookX = lerp(T.lookX, a.data.x, k); T.lookY = lerp(T.lookY, a.data.y, k) } },
@@ -333,7 +530,7 @@ const ACT = {
   },
   dream: { dur: 1.6, start() { leafV[1] += 90 }, tick(u, T) { T.mc = lerp(T.mc, 3.2, bell(u)); T.mo = lerp(T.mo, 0, bell(u)) } },
   perk: { dur: 0.45, start() { leafV[0] += 110; leafV[1] += 110; sqVel += 0.9 } },
-  aha: { dur: 1.2, start() { emit('idea', { x: 120, y: 78, vy: -14, s0: 0.5, s1: 1.2, max: 1.1 }); vy = 150 }, tick(u, T) { T.eye = 1.15; T.mo = Math.max(T.mo, 0.5 * bell(u)); T.mc = 4 } },
+  aha: { dur: 1.2, start() { emit('idea', { x: 120, y: 78, vy: -14, s0: 0.5, s1: 1.2, max: 1.1 }); vy = 105 }, tick(u, T) { T.eye = 1.15; T.mo = Math.max(T.mo, 0.5 * bell(u)); T.mc = 4 } },
 }
 function act(name, data) {
   const def = ACT[name]
@@ -379,6 +576,7 @@ function emotion() {
 // ---------- the pose for this frame ----------
 let nextBlink = 2, blinkT = -1, blinkTwice = false
 let nextIdle = 4, nextFx = 0, thinkSide = -1, thinkFlip = 3, lastEmo = ''
+let nextSaccade = 1, saccade = { x: 0, y: 0 }, nextSniff = 3, sniffUntil = 0, nextTwitch = 6
 
 function pose(dt) {
   const emo = emotion()
@@ -462,9 +660,20 @@ function pose(dt) {
     }
   } else blinkT = -1
 
+  // the small restless things a living creature does
+  if (emo !== 'asleep' && !isHeld) {
+    if (t > nextSaccade) { nextSaccade = t + rand(0.5, 2.2); saccade = { x: rand(-0.09, 0.09), y: rand(-0.06, 0.06) } }
+    A.lookX = (A.lookX || 0) + saccade.x; A.lookY = (A.lookY || 0) + saccade.y
+    if (t > nextSniff) { nextSniff = t + rand(3, 8); sniffUntil = t + 0.5 }
+    if (t < sniffUntil) A.nose = 0.5 * Math.sin(t * 42)
+    if (t > nextTwitch) { nextTwitch = t + rand(5, 13); leafV[Math.random() < 0.5 ? 0 : 1] += rand(40, 90) }
+    A.tilt = (A.tilt || 0) + 0.9 * Math.sin(t * 0.37) + 0.5 * Math.sin(t * 0.83 + 1)
+    A.lean = (A.lean || 0) + 0.8 * Math.sin(t * 0.29)
+  }
+
   // breathing
   const asleep = emo === 'asleep'
-  A.breath = asleep ? 0.03 * Math.sin(t * 1.25) : 0.012 * Math.sin(t * (tool ? 3 : 2.1))
+  A.breath = asleep ? 0.035 * Math.sin(t * 1.1) : 0.016 * Math.sin(t * (tool ? 2.6 : 1.9) + 0.4 * Math.sin(t * 0.31))
   if (asleep) T.perk += 5 * Math.sin(t * 1.25)
   return { T, A, emo }
 }
@@ -498,74 +707,83 @@ function physics(dt) {
 }
 
 // ---------- drawing ----------
-const set = (id, name, value) => $(id).setAttribute(name, value)
-const f = n => n.toFixed(2)
-function mouthPath(w, c, o, r) {
-  const cy = -c * 0.35, top = c - o * 9 * r, bot = c + o * 11
-  return `M${f(-w)},${f(cy)} Q0,${f(top * 2 - cy)} ${f(w)},${f(cy)} Q0,${f(bot * 2 - cy)} ${f(-w)},${f(cy)} Z`
+// The rig's numbers go to the shader, which renders Pip in 3D.
+const RAD = Math.PI / 180
+let gl = null, uniforms = {}
+function startGL() {
+  const canvas = $('gl')
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  canvas.width = 240 * dpr; canvas.height = 200 * dpr
+  const g = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false })
+  if (!g) throw new Error('WebGL is not available')
+  const compile = (type, source) => {
+    const s = g.createShader(type)
+    g.shaderSource(s, source); g.compileShader(s)
+    if (!g.getShaderParameter(s, g.COMPILE_STATUS)) throw new Error('shader: ' + g.getShaderInfoLog(s))
+    return s
+  }
+  const program = g.createProgram()
+  g.attachShader(program, compile(g.VERTEX_SHADER, 'attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }'))
+  g.attachShader(program, compile(g.FRAGMENT_SHADER, $('fs').textContent))
+  g.linkProgram(program)
+  if (!g.getProgramParameter(program, g.LINK_STATUS)) throw new Error('link: ' + g.getProgramInfoLog(program))
+  g.useProgram(program)
+  g.bindBuffer(g.ARRAY_BUFFER, g.createBuffer())
+  g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), g.STATIC_DRAW)
+  const at = g.getAttribLocation(program, 'p')
+  g.enableVertexAttribArray(at); g.vertexAttribPointer(at, 2, g.FLOAT, false, 0, 0)
+  for (const name of ['uRes', 'uRoot', 'uBody', 'uFace', 'uLid', 'uMouth', 'uArm', 'uFeet', 'uLeafR', 'uLeafL', 'uProp'])
+    uniforms[name] = g.getUniformLocation(program, name)
+  g.viewport(0, 0, canvas.width, canvas.height)
+  g.uniform2f(uniforms.uRes, canvas.width, canvas.height)
+  g.clearColor(0, 0, 0, 0)
+  gl = g
 }
+
 function render(A) {
+  if (!gl) return
   const v = k => P[k].v + (A[k] || 0)
-  const air = clamp(vy * 0.00035, -0.06, 0.1)
+  const air = clamp(vy * 0.00035, -0.05, 0.08)
   const sy = v('sy') * (1 + sq) * (1 + A.breath) + air, sx = 1 / Math.pow(Math.max(0.5, sy), 0.75)
-  const tilt = v('tilt') + (isHeld ? clamp(dragV.x * 0.035, -26, 26) : 0)
-
-  set('pip', 'transform', `translate(${f(120 + shakeX + v('lean'))},${f(184 - y)})`)
-  set('bodyG', 'transform', `rotate(${f(tilt)}) scale(${f(sx)},${f(sy)})`)
-  const k = clamp(1 - y / 110, 0.35, 1)
-  set('shadow', 'rx', f(42 * k * sx)); set('shadow', 'opacity', f(k))
-
-  const dangle = Math.min(2.5, y * 0.1) + (isHeld ? 6 : 0), swing = isHeld ? clamp(dragV.x * 0.03, -22, 22) : 0
-  set('footL', 'transform', `translate(0,${f(dangle)}) rotate(${f(swing)} -17 -6)`)
-  set('footR', 'transform', `translate(0,${f(dangle - v('footR'))}) rotate(${f(swing)} 17 -6)`)
-
-  set('sprout', 'transform', `rotate(${f(stemA)} 0 -83)`)
-  const perk = v('perk')
-  set('leafR', 'transform', `translate(0,-99) rotate(${f(-(perk + leafA[1]))})`)
-  set('leafL', 'transform', `translate(0,-99) scale(-0.92,0.92) rotate(${f(-(perk * 0.9 + leafA[0]))})`)
-
-  set('armR', 'transform', `translate(41,-40) rotate(${f(-v('armR'))})`)
-  set('armL', 'transform', `translate(-41,-40) rotate(${f(v('armL'))})`)
-  set('lens', 'opacity', f(clamp(v('lens'), 0, 1)))
-
+  const tilt = (v('tilt') + (isHeld ? clamp(dragV.x * 0.035, -26, 26) : 0)) * RAD
   const lx = clamp(v('lookX'), -1.2, 1.2), ly = clamp(v('lookY'), -1.2, 1.2)
-  set('face', 'transform', `translate(${f(lx * 3.2)},${f(ly * 2.2)})`)
-  const hidden = clamp(Math.max(v('happy'), v('closed'), v('squeeze')), 0, 1)
-  const eye = clamp(v('eye'), 0.2, 1.4), blink = clamp(1 - (A.blink || 0), 0.06, 1), lid = clamp(v('lid'), 0, 0.95)
-  const lidY = (-8.6 + lid * 17.2) * eye
-  for (const [side, cx] of [['L', -15], ['R', 15]]) {
-    set('eye' + side, 'transform', `translate(${f(cx + lx * 2.2)},${f(-52 + ly * 1.8)})`)
-    set('eye' + side + 'open', 'opacity', f(1 - hidden))
-    set('eye' + side + 'ball', 'transform', `scale(${f(eye)},${f(eye * blink)})`)
-    set('lid' + side, 'y', f(lidY))
-    set('lidLine' + side, 'd', `M-7.4,${f(lidY + 1)} Q0,${f(lidY - 1.4)} 7.4,${f(lidY + 1)}`)
-    set('lidLine' + side, 'opacity', lid > 0.05 && blink > 0.5 ? 1 : 0)
-    set('eye' + side + 'happy', 'opacity', f(clamp(v('happy'), 0, 1)))
-    set('eye' + side + 'closed', 'opacity', f(clamp(v('closed'), 0, 1)))
-    set('eye' + side + 'squeeze', 'opacity', f(clamp(v('squeeze'), 0, 1)))
-  }
-  const brow = clamp(v('brow'), 0, 1)
-  set('browL', 'transform', `translate(-15,${f(-66 + v('browY'))}) rotate(${f(v('browTilt'))})`)
-  set('browR', 'transform', `translate(15,${f(-66 + v('browY'))}) rotate(${f(-v('browTilt'))})`)
-  set('browL', 'opacity', f(brow)); set('browR', 'opacity', f(brow))
-  set('mouth', 'transform', 'translate(0,-33)')
-  set('mouth', 'd', mouthPath(Math.max(2, v('mw')), v('mc'), clamp(v('mo'), 0, 1), clamp(v('mr'), 0, 1)))
-  const blush = clamp(v('blush'), 0, 1)
-  set('cheekL', 'opacity', f(blush)); set('cheekR', 'opacity', f(blush))
-  set('glow', 'opacity', f(clamp(v('glow'), 0, 0.7)))
 
-  for (const prop of ['laptop', 'book']) {
-    const show = clamp(v(prop), 0, 1)
-    set(prop, 'opacity', f(show)); set(prop, 'transform', `translate(0,${f((1 - show) * 14)})`)
-  }
+  // Eyelids do what brows did in the drawing: they lower, squint and slant.
+  const happy = clamp(v('happy'), 0, 1), closed = clamp(v('closed'), 0, 1), squeeze = clamp(v('squeeze'), 0, 1)
+  const shut = clamp(Math.max(closed, squeeze, A.blink || 0), 0, 1)
+  const top = 1 - 2 * Math.max(0.06 + clamp(v('lid'), 0, 0.95) * 0.9, shut * 0.62, happy * 0.56)
+  const bot = -1 + 2 * Math.max(shut * 0.38, happy * 0.44)
+  const curve = closed * 0.3 + squeeze * 0.12 - happy * 0.5
+  const slant = clamp(v('brow'), 0, 1) * clamp(v('browTilt'), -18, 18) / 16 * 0.4
+
+  const armR = v('armR') * RAD, armL = -v('armL') * RAD
+  const dangle = Math.min(2.5, y * 0.1) + (isHeld ? 6 : 0), swing = isHeld ? clamp(dragV.x * 0.012, -8, 8) : 0
+  const leafR = (v('perk') + leafA[1]) * RAD, leafL = (v('perk') * 0.9 + leafA[0]) * RAD, stem = stemA * RAD
+  const prop = k => clamp(v(k), 0, 1)
+
+  gl.uniform4f(uniforms.uRoot, shakeX + v('lean'), Math.max(0, y), swing, A.nose || 0)
+  gl.uniform4f(uniforms.uBody, Math.cos(tilt), Math.sin(tilt), sx, sy)
+  gl.uniform4f(uniforms.uFace, lx, ly, clamp(v('eye'), 0.2, 1.4), clamp(v('blush'), 0, 1))
+  gl.uniform4f(uniforms.uLid, top, bot, curve, slant)
+  gl.uniform4f(uniforms.uMouth, Math.max(2, v('mw')), v('mc'), clamp(v('mo'), 0, 1), clamp(v('mr'), 0, 1))
+  gl.uniform4f(uniforms.uArm, Math.cos(armR), Math.sin(armR), Math.cos(armL), Math.sin(armL))
+  gl.uniform4f(uniforms.uFeet, dangle, v('footR'), 0, 0)
+  gl.uniform4f(uniforms.uLeafR, Math.cos(leafR), Math.sin(leafR), Math.cos(stem), Math.sin(stem))
+  gl.uniform4f(uniforms.uLeafL, Math.cos(leafL), Math.sin(leafL), 0, 0)
+  gl.uniform4f(uniforms.uProp, prop('laptop'), prop('book'), prop('lens'), clamp(v('glow'), 0, 0.7))
+  gl.clear(gl.COLOR_BUFFER_BIT)
+  gl.drawArrays(gl.TRIANGLES, 0, 3)
 }
 
+// 30 pictures a second while awake, 15 asleep: smooth to the eye, light on
+// the battery.
 let last = performance.now(), frameNo = 0
 function frame(now) {
   requestAnimationFrame(frame)
-  // Asleep and still: draw every other frame to stay light.
-  if (lastEmo === 'asleep' && !action && !isHover && (frameNo++ & 1)) return
-  const dt = Math.min(0.08, (now - last) / 1000)
+  frameNo++
+  const calm = lastEmo === 'asleep' && !action && !isHover && !parts.length
+  if (frameNo % (calm ? 4 : 2)) return
+  const dt = Math.min(0.12, (now - last) / 1000)
   last = now; t += dt
   shakeX = 0
   const { T, A } = pose(dt)
@@ -723,7 +941,7 @@ function pat() {
   pats = pats.filter(at => t - at < 5); pats.push(t)
   patUntil = t + 3; sqVel -= 2.6; leafV[0] += 140; leafV[1] -= 140
   hearts(pats.length >= 3 ? 7 : 3)
-  if (pats.length >= 3) vy = 170
+  if (pats.length >= 3) vy = 125
   redraw(); setTimeout(redraw, 3050)
 }
 function pointerAt(dx, dy) { pointer = { x: dx, y: dy, at: t } }
@@ -739,6 +957,7 @@ function grab() {
 function drag(vx, vyDown) { dragV.x = lerp(dragV.x, vx, 0.5); dragV.y = lerp(dragV.y, vyDown, 0.5) }
 function drop() { isHeld = false; y = 16; vy = 0; redraw() }
 
+try { startGL() } catch (err) { const h = host('log'); if (h) h.postMessage(String(err)) }
 requestAnimationFrame(frame)
 requestAnimationFrame(report)
 </script></body></html>

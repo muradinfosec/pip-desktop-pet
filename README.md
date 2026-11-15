@@ -2,14 +2,15 @@
 
 A little sprout-headed pet that lives on your Mac desktop. Pip floats above your windows, has moods, reacts when you pat it or carry it around, and talks back when you talk to it.
 
-![Pip greeting you, typing on a laptop, thinking, celebrating and feeling sad](docs/pip.png)
+![Pip saying hello, typing on a laptop, reading a book, celebrating and asleep](docs/pip.png)
 
 ## What Pip does
 
 - **Lives on top of everything.** Pip floats above every app and on every Space. Clicks around it go straight through to the windows underneath.
-- **Has feelings.** Pip is drawn live, not from canned animations: springs and physics move its body, eyes, brows, mouth, arms and leaves. It has 16 emotions, from happy and curious to bored, sleepy and sad.
-- **Gets up to things.** Left alone, Pip looks around, hops, hums, stretches, yawns and eventually falls asleep.
-- **Notices you.** Its eyes follow your pointer, and hovering makes it blush. Click to pat it (three quick pats make it jump); drag it and it dangles, then lands with a puff of dust.
+- **Looks alive.** Pip is a small 3D creature rendered live, not a drawing: fuzzy peach skin, wet eyes with real eyelids, a damp nose, a leafy sprout, real light and a soft shadow.
+- **Has feelings.** Springs and physics move its body, eyes, lids, mouth, arms and leaves through 16 emotions, from happy and curious to bored, sleepy and sad.
+- **Gets up to things.** Left alone, Pip looks around, sniffs, hops, stretches, yawns and eventually falls asleep.
+- **Notices you.** Its eyes follow your pointer, and hovering makes it blush. Click to pat it (three quick pats make it hop); drag it and it dangles, then lands with a puff of dust.
 - **Talks.** Press **⌃⌥P** (Control-Option-P) anywhere and speak. Pip listens, then answers in its speech bubble and out loud in a small, high pet voice.
 - **Does things for you.** Pip can read files, run commands and use your connected services, like Jira, Confluence or email. It always asks first before running a command, changing a file or sending anything.
 - **Watches your Claude Code sessions.** Pip sees every Claude Code session on your Mac, shows the busy one, and can tell you what any of them is doing.

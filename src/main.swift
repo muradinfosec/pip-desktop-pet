@@ -339,7 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   /// Makes the window as tall as the bubble needs (300 to 560 points),
   /// growing away from Pip so Pip itself never moves.
   func fitBubble(_ bubbleHeight: CGFloat) {
-    let needed = isBelow ? 200 - 16 + bubbleHeight + 14 : 200 - 58 + 6 + bubbleHeight + 14
+    let needed = isBelow ? 200 - 4 + bubbleHeight + 14 : 200 - 58 + 6 + bubbleHeight + 14
     let height = min(max(300, needed.rounded(.up)), 560)
     var frame = panel.frame
     guard abs(frame.height - height) >= 2 else { return }
