@@ -119,6 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   let agent = PipAgent()
   var sessions: [ClaudeSession] = []
   var lastShown = ""
+  var shownSessionId: String?  // the session in Pip's bubble, kept until another needs you more
+  var lastSeenDebug = ""
+  var lastAnswer = ""
   var isBelow: Bool {          // near the top of the screen the bubble sits under Pip
     get { UserDefaults.standard.bool(forKey: "bubbleBelow") }
     set { UserDefaults.standard.set(newValue, forKey: "bubbleBelow") }
@@ -140,7 +143,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
   // dictation
   let audio = AVAudioEngine()
-  let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+  var finishTimer: Timer?
+  var isFinishing = false        // waiting for the recognizer's last, most accurate pass
+  var lastWasFinal = false
+
+  /// The language Pip listens in: the one chosen in the menu, else the Mac's
+  /// own, else the nearest one the recognizer knows (English for en_AZ, say).
+  static let dictationChoices: [(id: String, title: String)] = [
+    ("", "Same as This Mac"), ("en-US", "English (US)"), ("en-GB", "English (UK)"), ("ru-RU", "Russian"), ("tr-TR", "Turkish"),
+  ]
+  var dictationLanguage: String {
+    get { UserDefaults.standard.string(forKey: "dictationLanguage") ?? "" }
+    set { UserDefaults.standard.set(newValue, forKey: "dictationLanguage") }
+  }
+  /// Off by default: Apple's server recognition hears accents and names much
+  /// better. On keeps your voice on this Mac, at some cost in accuracy.
+  var usesPrivateDictation: Bool {
+    get { UserDefaults.standard.bool(forKey: "privateDictation") }
+    set { UserDefaults.standard.set(newValue, forKey: "privateDictation") }
+  }
+  var recognizer: SFSpeechRecognizer? {
+    if !dictationLanguage.isEmpty { return SFSpeechRecognizer(locale: Locale(identifier: dictationLanguage)) }
+    let current = Locale.current
+    let supported = SFSpeechRecognizer.supportedLocales()
+    if supported.contains(where: { $0.identifier == current.identifier }) { return SFSpeechRecognizer(locale: current) }
+    let language = current.language.languageCode?.identifier ?? "en"
+    if language == "en" { return SFSpeechRecognizer(locale: Locale(identifier: "en-US")) }
+    if let match = supported.first(where: { $0.language.languageCode?.identifier == language }) { return SFSpeechRecognizer(locale: match) }
+    return SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+  }
   var request: SFSpeechAudioBufferRecognitionRequest?
   var task: SFSpeechRecognitionTask?
   var heard = ""
@@ -180,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     config.userContentController.add(self, name: "hit")
     config.userContentController.add(self, name: "log")
     config.userContentController.add(self, name: "approve")
+    config.userContentController.add(self, name: "size")
     view = PetView(frame: NSRect(origin: .zero, size: size), configuration: config)
     view.setValue(false, forKey: "drawsBackground")
     view.navigationDelegate = self
@@ -207,6 +239,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
     if message.name == "log" {
       if isDebug { NSLog("page: %@", "\(message.body)") }
+      return
+    }
+    if message.name == "size" {
+      if let height = message.body as? Double { fitBubble(CGFloat(height)) }
       return
     }
     if message.name == "approve" {
@@ -294,9 +330,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   // Normally the bubble is above Pip and the stage fills the bottom; near the
   // top of the screen the bubble moves under Pip and the stage fills the top.
 
-  /// Pip's body on screen for a window at `origin`.
+  /// Pip's body on screen for a window at `origin`. Pip's 200-point stage sits
+  /// at the bottom of the window, or at its top when the bubble is below.
   func bodyRect(at origin: NSPoint) -> NSRect {
-    NSRect(x: origin.x + 80, y: origin.y + (isBelow ? 112 : 12), width: 100, height: 106)
+    NSRect(x: origin.x + 80, y: origin.y + (isBelow ? panel.frame.height - 200 + 12 : 12), width: 100, height: 106)
+  }
+
+  /// Makes the window as tall as the bubble needs (300 to 560 points),
+  /// growing away from Pip so Pip itself never moves.
+  func fitBubble(_ bubbleHeight: CGFloat) {
+    let needed = isBelow ? 200 - 16 + bubbleHeight + 14 : 200 - 58 + 6 + bubbleHeight + 14
+    let height = min(max(300, needed.rounded(.up)), 560)
+    var frame = panel.frame
+    guard abs(frame.height - height) >= 2 else { return }
+    if isBelow { frame.origin.y = frame.maxY - height }  // keep the top (and Pip) in place
+    frame.size.height = height
+    panel.setFrame(frame, display: true)
+    placeBubble()
   }
 
   /// A window origin that keeps Pip's body on the screen under the pointer,
@@ -318,12 +368,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   func placeBubble() {
     guard let area = (panel.screen ?? NSScreen.main)?.visibleFrame else { return }
     var origin = panel.frame.origin
-    if !isBelow, origin.y + 300 > area.maxY + 2 {
+    let height = panel.frame.height
+    if !isBelow, origin.y + height > area.maxY + 2 {
       isBelow = true
-      origin.y -= 100
-    } else if isBelow, origin.y + 100 + 300 <= area.maxY {
+      origin.y -= height - 200          // the stage stays where it was
+    } else if isBelow, origin.y + height - 200 + height <= area.maxY {
       isBelow = false
-      origin.y += 100
+      origin.y += height - 200
     } else {
       return
     }
@@ -337,8 +388,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   func poll() {
     guard isLoaded else { return }
     sessions = readSessions()
+    if isDebug {
+      let seen = sessions.map { "\($0.label)=\($0.mood):\($0.line)" }.joined(separator: " | ")
+      if seen != lastSeenDebug { lastSeenDebug = seen; NSLog("sessions: %@", seen) }
+    }
     var status: [String: Any] = [:]
-    if let top = sessions.first {
+    // Stay with the session already shown while it is as urgent as any other,
+    // so two busy sessions don't take turns in the bubble on every write.
+    var pick = sessions.first
+    if let best = pick, let current = sessions.first(where: { $0.id == shownSessionId }), current.urgency >= best.urgency {
+      pick = current
+    }
+    shownSessionId = pick?.id
+    if let top = pick {
       let busy = sessions.filter { $0.urgency >= 1 }
       let named = busy.count > 1 && !top.label.isEmpty && top.label != "this session"
       status = ["mood": top.mood == "idle" ? "done" : top.mood, "activity": top.activity, "line": top.line]
@@ -360,6 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       let json = String(data: data, encoding: .utf8), json != lastShown
     {
       lastShown = json
+      if isDebug { NSLog("shows: %@", json) }
       js("show(\(json))")
     }
 
@@ -389,6 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   }
 
   @objc func toggleListening() {
+    if isFinishing { return }
     if !isListening { panel.orderFrontRegardless() }
     isListening ? finishListening(send: true) : startListening()
   }
@@ -463,6 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     add("Move Pip to the Corner", #selector(moveToCorner))
     add(isListening ? "Stop Listening (\(shortcutLabel))" : "Talk to Pip (\(shortcutLabel))", #selector(toggleListening))
     add("Pat Pip", #selector(patPip))
+    if !lastAnswer.isEmpty { add("Show Last Answer", #selector(showLastAnswer)) }
     menu.addItem(.separator())
     add("Speak Answers", #selector(toggleSpeaking), on: speaksAnswers)
     add("Pet Voice", #selector(togglePetVoice), on: usesPetVoice)
@@ -479,6 +544,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     access.submenu = levels
     menu.addItem(access)
+    let dictation = NSMenuItem(title: "Dictation", action: nil, keyEquivalent: "")
+    let options = NSMenu()
+    for choice in AppDelegate.dictationChoices {
+      let item = options.addItem(withTitle: choice.title, action: #selector(chooseDictationLanguage(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = choice.id
+      item.state = dictationLanguage == choice.id ? .on : .off
+    }
+    options.addItem(.separator())
+    let privately = options.addItem(withTitle: "Keep My Voice on This Mac (less accurate)", action: #selector(togglePrivateDictation), keyEquivalent: "")
+    privately.target = self
+    privately.state = usesPrivateDictation ? .on : .off
+    dictation.submenu = options
+    menu.addItem(dictation)
     add("Watch All Claude Sessions", #selector(toggleWatchSessions), on: areHooksInstalled())
     let live = sessions.filter { $0.ageSeconds < 3600 }
     if !live.isEmpty {
@@ -599,16 +678,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   }
 
   func beginRecognition() {
-    guard !isListening, let recognizer = recognizer, recognizer.isAvailable else {
+    guard !isListening, !isFinishing, let recognizer = recognizer, recognizer.isAvailable else {
       js("settle(\(quoted("Speech recognition isn't available right now.")))")
       return
     }
     voice.stopSpeaking(at: .immediate)
     heard = ""
+    lastWasFinal = false
 
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.shouldReportPartialResults = true
-    if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
+    request.taskHint = .dictation
+    request.addsPunctuation = true
+    request.requiresOnDeviceRecognition = usesPrivateDictation && recognizer.supportsOnDeviceRecognition
+    // Words Pip should expect: its own name, Claude's products, connectors,
+    // and the names of your sessions and projects.
+    var hints = ["Pip", "Claude", "Claude Code", "Cowork", "Anthropic", "Jira", "Confluence", "Gmail", "Slack", "GitHub", "pull request", "commit", "push"]
+    for one in sessions.prefix(8) {
+      hints.append(contentsOf: [one.title, one.project].filter { !$0.isEmpty && $0.count < 40 })
+    }
+    request.contextualStrings = Array(Set(hints)).sorted()
     self.request = request
 
     let input = audio.inputNode
@@ -632,14 +721,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     task = recognizer.recognitionTask(with: request) { [weak self] result, error in
       DispatchQueue.main.async {
-        guard let self = self, self.isListening else { return }
+        guard let self = self, self.isListening || self.isFinishing else { return }
         if let result = result {
           self.heard = result.bestTranscription.formattedString
+          self.lastWasFinal = result.isFinal
           self.js("listening(\(self.quoted(self.heard)))")
-          if result.isFinal { self.finishListening(send: true); return }
-          self.waitForQuiet(seconds: 1.6)  // a pause ends the question
+          if result.isFinal {
+            if self.isListening { self.finishListening(send: true) } else { self.completeListening(send: true) }
+            return
+          }
+          if self.isListening { self.waitForQuiet(seconds: 2.2) }  // a pause ends what you're saying
         } else if error != nil {
-          self.finishListening(send: true)
+          if self.isListening { self.finishListening(send: true) } else { self.completeListening(send: true) }
         }
       }
     }
@@ -652,6 +745,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
   }
 
+  /// Stops the microphone, then gives the recognizer a moment for its final
+  /// pass over everything you said, which is more accurate than the live text.
   func finishListening(send: Bool) {
     guard isListening else { return }
     isListening = false
@@ -659,11 +754,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     audio.stop()
     audio.inputNode.removeTap(onBus: 0)
     request?.endAudio()
+    guard send, !lastWasFinal else { isFinishing = true; completeListening(send: send); return }
+    isFinishing = true
+    finishTimer?.invalidate()
+    finishTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+      self?.completeListening(send: true)
+    }
+  }
+
+  func completeListening(send: Bool) {
+    guard isFinishing else { return }
+    isFinishing = false
+    finishTimer?.invalidate()
     task?.cancel()
     request = nil
     task = nil
 
     let said = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+    if isDebug { NSLog("heard: %@", said) }
     if agent.isWaitingForApproval {
       guard send, !said.isEmpty else { js("backToApproval()"); return }
       NSSound(named: "Pop")?.play()
@@ -681,6 +789,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     NSSound(named: "Pop")?.play()
     js("asking(\(quoted(said)))")
     ask(said)
+  }
+
+  @objc func chooseDictationLanguage(_ sender: NSMenuItem) {
+    dictationLanguage = sender.representedObject as? String ?? ""
+  }
+
+  @objc func togglePrivateDictation() {
+    usesPrivateDictation.toggle()
   }
 
   func ask(_ said: String) {
@@ -722,8 +838,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       history.append((said, reply))
       if history.count > 10 { history.removeFirst(history.count - 10) }
     }
+    lastAnswer = reply
     js("answered(\(quoted(reply)))")
     speak(reply)
+  }
+
+  @objc func showLastAnswer() {
+    guard !lastAnswer.isEmpty else { return }
+    panel.orderFrontRegardless()
+    js("answered(\(quoted(lastAnswer)), true)")
   }
 
   // ---------- speaking ----------

@@ -231,40 +231,219 @@ let projectsFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPa
 let desktopSessionsFolder = FileManager.default.homeDirectoryForCurrentUser
   .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
 
+/// What one conversation file last showed, and how far Pip has read it.
+private struct FileState {
+  var offset: UInt64 = 0          // bytes read so far; new lines start here
+  var size: UInt64 = 0
+  var cwd = ""
+  var prompt = ""
+  var title = ""
+  var kind = "none"               // the last thing that happened (see `apply`)
+  var tool = ""
+  var toolInput: [String: Any] = [:]
+  var at: Double = 0              // when it happened, ms since 1970
+}
+
 final class SessionScanner {
-  private var cache: [String: (Date, ClaudeSession?)] = [:]
-  private var lastScan = Date.distantPast
+  private var files: [String: FileState] = [:]
+  private var lastList = Date.distantPast
+  private var known: [URL] = []
   private var lastTitleScan = Date.distantPast
-  private var found: [ClaudeSession] = []
   private(set) var titles: [String: String] = [:]
 
-  /// Sessions whose conversation changed in the last two hours. Re-reads a
-  /// file only when it changed, and looks for new ones every two seconds.
+  /// Every session whose conversation saw real activity in the last two
+  /// hours. Each file is followed from where Pip last stopped reading, so a
+  /// busy session costs only its new lines, however long it has grown.
   func scan() -> [ClaudeSession] {
     let now = Date()
     if now.timeIntervalSince(lastTitleScan) > 5 { lastTitleScan = now; readTitles() }
-    guard now.timeIntervalSince(lastScan) > 2 else { return found }
-    lastScan = now
+    if now.timeIntervalSince(lastList) > 3 { lastList = now; known = listRecent(now) }
     var result: [ClaudeSession] = []
+    for file in known {
+      var state = files[file.path] ?? FileState()
+      follow(file, &state)
+      files[file.path] = state
+      if let one = session(file, state), one.ageSeconds < 2 * 3600 { result.append(one) }
+    }
+    return result
+  }
+
+  /// Conversation files changed in the last two hours.
+  private func listRecent(_ now: Date) -> [URL] {
     let fm = FileManager.default
-    let folders = (try? fm.contentsOfDirectory(at: projectsFolder, includingPropertiesForKeys: nil)) ?? []
-    for folder in folders {
-      let files = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-      for file in files where file.pathExtension == "jsonl" {
-        guard let changed = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+    var out: [URL] = []
+    for folder in (try? fm.contentsOfDirectory(at: projectsFolder, includingPropertiesForKeys: nil)) ?? [] {
+      for file in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+      where file.pathExtension == "jsonl" {
+        if let changed = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
           now.timeIntervalSince(changed) < 2 * 3600
-        else { continue }
-        if let known = cache[file.path], known.0 == changed {
-          if let one = known.1 { result.append(one) }
-          continue
+        {
+          out.append(file)
         }
-        let one = readTranscript(file, changed: changed)
-        cache[file.path] = (changed, one)
-        if let one = one { result.append(one) }
       }
     }
-    found = result
-    return result
+    return out
+  }
+
+  /// Reads what was added since last time. The first time, or when the file
+  /// was rewritten, it reads backwards until it finds the last real message,
+  /// since a long session can end with megabytes of bookkeeping.
+  private func follow(_ file: URL, _ state: inout FileState) {
+    guard let handle = try? FileHandle(forReadingFrom: file) else { return }
+    defer { try? handle.close() }
+    let size = (try? handle.seekToEnd()) ?? 0
+    if size == state.size { return }
+    if size < state.offset || state.offset == 0 {
+      state = FileState()
+      var start = size
+      var chunk: UInt64 = 512 * 1024
+      while true {
+        start = size > chunk ? size - chunk : 0
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.readToEnd()) ?? Data()
+        var entries = lines(data, dropFirst: start > 0)
+        if let last = entries.lastIndex(where: { isMessage($0) }) {
+          // Older lines may still hold the prompt and the folder.
+          for entry in entries[..<last].reversed() {
+            if state.prompt.isEmpty, entry["type"] as? String == "last-prompt", let p = entry["lastPrompt"] as? String { state.prompt = p }
+            if state.cwd.isEmpty, let cwd = entry["cwd"] as? String { state.cwd = cwd }
+            if state.title.isEmpty, entry["type"] as? String == "custom-title", let t = entry["customTitle"] as? String { state.title = t }
+          }
+          entries = Array(entries[last...])
+          for entry in entries { apply(entry, &state) }
+          break
+        }
+        if start == 0 || chunk >= 32 * 1024 * 1024 {
+          for entry in entries { apply(entry, &state) }
+          break
+        }
+        chunk *= 4
+      }
+      state.offset = size
+      state.size = size
+      return
+    }
+    try? handle.seek(toOffset: state.offset)
+    let data = (try? handle.readToEnd()) ?? Data()
+    // Keep a line still being written for next time.
+    guard let lastNewline = data.lastIndex(of: 0x0A) else { return }
+    let complete = data.prefix(through: lastNewline)
+    for entry in lines(complete, dropFirst: false) { apply(entry, &state) }
+    state.offset += UInt64(complete.count)
+    state.size = size
+  }
+
+  private func lines(_ data: Data, dropFirst: Bool) -> [[String: Any]] {
+    var parts = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+    if dropFirst, !parts.isEmpty { parts.removeFirst() }  // likely cut in half
+    return parts.compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
+  }
+
+  private func isMessage(_ entry: [String: Any]) -> Bool {
+    let type = entry["type"] as? String
+    guard type == "user" || type == "assistant" else { return false }
+    return entry["isSidechain"] as? Bool != true && entry["isMeta"] as? Bool != true
+      && entry["isCompactSummary"] as? Bool != true && entry["isVisibleInTranscriptOnly"] as? Bool != true
+  }
+
+  private static let isoWithFraction: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+  }()
+
+  private func time(_ entry: [String: Any]) -> Double? {
+    guard let stamp = entry["timestamp"] as? String else { return nil }
+    let date = SessionScanner.isoWithFraction.date(from: stamp) ?? ISO8601DateFormatter().date(from: stamp)
+    return date.map { $0.timeIntervalSince1970 * 1000 }
+  }
+
+  /// One line of a conversation: messages move the state on, bookkeeping
+  /// only fills in the prompt, title and folder, and never counts as activity.
+  private func apply(_ entry: [String: Any], _ state: inout FileState) {
+    let type = entry["type"] as? String ?? ""
+    if let cwd = entry["cwd"] as? String { state.cwd = cwd }
+    switch type {
+    case "last-prompt":
+      if let p = entry["lastPrompt"] as? String { state.prompt = p }
+      return
+    case "custom-title":
+      if let t = entry["customTitle"] as? String { state.title = t }
+      return
+    case "system":
+      // The end of a turn, when stop hooks ran.
+      if (entry["subtype"] as? String) == "stop_hook_summary", entry["isSidechain"] as? Bool != true {
+        if state.kind == "text" || state.kind == "thinking" { state.kind = "stop" }
+        if let at = time(entry) { state.at = at }
+      }
+      return
+    default:
+      break
+    }
+    guard isMessage(entry) else { return }
+    let at = time(entry) ?? state.at
+    let content = (entry["message"] as? [String: Any])?["content"]
+    let blocks = content as? [[String: Any]] ?? []
+    if type == "user" {
+      let typed = (content as? String) ?? blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String ?? ""
+      if blocks.contains(where: { $0["type"] as? String == "tool_result" }) {
+        state.kind = "tool-result"
+      } else if typed.hasPrefix("[Request interrupted") {
+        state.kind = "interrupted"
+      } else if !typed.isEmpty {
+        state.kind = "prompt"
+        if !typed.hasPrefix("<") { state.prompt = typed }
+      } else {
+        return
+      }
+    } else {
+      if let use = blocks.last(where: { $0["type"] as? String == "tool_use" }) {
+        state.kind = "tool"
+        state.tool = use["name"] as? String ?? ""
+        state.toolInput = use["input"] as? [String: Any] ?? [:]
+      } else if blocks.contains(where: { $0["type"] as? String == "text" }) {
+        state.kind = "text"
+      } else if blocks.contains(where: { $0["type"] as? String == "thinking" }) {
+        state.kind = "thinking"
+      } else {
+        return
+      }
+    }
+    state.at = at
+  }
+
+  /// What the session is doing now, from what last happened and how long ago.
+  private func session(_ file: URL, _ state: FileState) -> ClaudeSession? {
+    guard state.kind != "none" else { return nil }
+    let cwd = state.cwd
+    var one = ClaudeSession(
+      id: file.deletingPathExtension().lastPathComponent,
+      project: cwd.isEmpty ? file.deletingLastPathComponent().lastPathComponent : (cwd as NSString).lastPathComponent,
+      cwd: cwd, mood: "idle", activity: "", line: "Ready", prompt: "", transcript: file.path, updatedAt: state.at)
+    one.title = state.title
+    let flat = state.prompt.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    one.prompt = flat.count > 120 ? String(flat.prefix(119)) + "…" : flat
+    let age = one.ageSeconds
+    switch state.kind {
+    case "prompt", "tool-result", "thinking":
+      (one.mood, one.line) = ("thinking", "Thinking…")
+    case "tool":
+      let said = describeTool(state.tool, state.toolInput)
+      (one.mood, one.activity, one.line) = (said.mood, said.activity, said.line)
+    case "text":
+      // A reply with no tool after it: done, unless more is on its way.
+      (one.mood, one.line) = age < 6 ? ("thinking", "Writing…") : ("done", "All done! Your turn.")
+    case "stop":
+      (one.mood, one.line) = ("done", "All done! Your turn.")
+    case "interrupted":
+      (one.mood, one.line) = ("idle", "Stopped.")
+    default:
+      break
+    }
+    // Nothing new for a long while in the middle of a task: it ended without
+    // a reply, or it is waiting on something Pip can't see.
+    if ["thinking", "working"].contains(one.mood), age > 15 * 60 { (one.mood, one.activity, one.line) = ("idle", "", "Quiet for a while") }
+    return one
   }
 
   /// The desktop app's title for each of its Code sessions, by session id.
@@ -282,49 +461,6 @@ final class SessionScanner {
       out[id] = title
     }
     titles = out
-  }
-
-  /// What a session is doing, from the last entries of its conversation.
-  private func readTranscript(_ file: URL, changed: Date) -> ClaudeSession? {
-    guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
-    defer { try? handle.close() }
-    let size = (try? handle.seekToEnd()) ?? 0
-    try? handle.seek(toOffset: size > 65536 ? size - 65536 : 0)
-    guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
-
-    var one = ClaudeSession(
-      id: file.deletingPathExtension().lastPathComponent, project: "", cwd: "", mood: "idle", activity: "",
-      line: "Ready", prompt: "", transcript: file.path, updatedAt: changed.timeIntervalSince1970 * 1000)
-    var isDecided = false
-    for raw in text.split(separator: "\n").reversed() {
-      guard let entry = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] else { continue }
-      if entry["isSidechain"] as? Bool == true { continue }
-      if one.cwd.isEmpty, let cwd = entry["cwd"] as? String { one.cwd = cwd; one.project = (cwd as NSString).lastPathComponent }
-      let type = entry["type"] as? String
-      let content = (entry["message"] as? [String: Any])?["content"]
-      if type == "user" {
-        let blocks = content as? [[String: Any]] ?? []
-        let typed = (content as? String) ?? blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String
-        let isToolResult = blocks.contains { $0["type"] as? String == "tool_result" }
-        if one.prompt.isEmpty, let typed = typed, !isToolResult, !typed.hasPrefix("<") {
-          let flat = typed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-          one.prompt = flat.count > 120 ? String(flat.prefix(119)) + "…" : flat
-        }
-        if !isDecided, typed != nil || isToolResult { one.mood = "thinking"; one.line = "Thinking…"; isDecided = true }
-      } else if type == "assistant", !isDecided {
-        let blocks = content as? [[String: Any]] ?? []
-        if let use = blocks.last(where: { $0["type"] as? String == "tool_use" }), let name = use["name"] as? String {
-          let said = describeTool(name, (use["input"] as? [String: Any]) ?? [:])
-          one.mood = said.mood; one.activity = said.activity; one.line = said.line
-        } else {
-          one.mood = "done"; one.line = "All done! Your turn."
-        }
-        isDecided = true
-      }
-      if isDecided && !one.cwd.isEmpty && !one.prompt.isEmpty { break }
-    }
-    if one.cwd.isEmpty { one.project = file.deletingLastPathComponent().lastPathComponent }
-    return one
   }
 }
 

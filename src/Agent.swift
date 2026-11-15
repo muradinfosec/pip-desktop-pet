@@ -112,7 +112,8 @@ final class PipAgent {
       for turn in history.suffix(5) { prompt += "User: \(turn.said)\nPip: \(turn.reply)\n" }
       prompt += "\n"
     }
-    prompt += "The user just said out loud: \"\(said)\""
+    prompt += "The user just said out loud: \"\(said)\"\n"
+    prompt += "(This came from speech recognition, so some words may be misheard. Go by what they most likely meant; if it's truly unclear, ask them in one short question.)"
 
     let access = ComputerAccess.current
     var args = [

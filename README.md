@@ -40,9 +40,9 @@ Pip answers through the [Claude Code](https://claude.com/claude-code) command-li
 claude auth login
 ```
 
-The first time you press ⌃⌥P, macOS asks to let Pip use the microphone and speech recognition. Speech is turned into text on your Mac when macOS supports it.
+The first time you press ⌃⌥P, macOS asks to let Pip use the microphone and speech recognition.
 
-Pip listens and speaks in your Mac's language.
+Pip uses Apple's speech recognition, the same as Mac dictation, which sends your voice to Apple for the most accurate result. To keep your voice on your Mac instead (a little less accurate), turn on **Dictation → Keep My Voice on This Mac** in Pip's menu. The same menu picks the language Pip listens in; by default it's your Mac's.
 
 ## What Pip may do
 
@@ -87,12 +87,13 @@ Regular claude.ai chats are stored on Claude's servers, not on your Mac, so Pip 
 - **Move:** drag Pip anywhere, right up to the menu bar. It remembers the spot.
 - **Pat:** click Pip.
 - **Talk:** press ⌃⌥P, speak, then pause. Press ⌃⌥P again to stop early.
+- **Read:** long answers stay up long enough to read, and stay while your pointer rests on Pip. **Show Last Answer** in the menu brings back the last one.
 - **Menu:** right-click Pip, or click the Pip icon in the menu bar, for:
   - Show or hide Pip
   - Move Pip to the corner, for when it's lost off-screen
   - Talk to Pip and Pat Pip
   - Speak Answers, Pet Voice and Open at Login switches
-  - Computer Access and Watch All Claude Sessions
+  - Computer Access, Dictation and Watch All Claude Sessions
   - Your Claude Code sessions and what each is doing
   - Quit Pip
 
