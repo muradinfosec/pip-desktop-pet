@@ -127,6 +127,7 @@ struct ClaudeSession {
   var prompt: String
   var transcript: String
   var updatedAt: Double  // ms since 1970
+  var background = 0     // background tasks still running
 
   var ageSeconds: Double { Date().timeIntervalSince1970 - updatedAt / 1000 }
 
@@ -205,7 +206,10 @@ func readSessions() -> [ClaudeSession] {
     guard var one = session(from: record) else { continue }
     if one.ageSeconds > watchWindow { continue }
     if one.ageSeconds > (one.mood == "working" ? 60 * 60 : one.mood == "thinking" ? 15 * 60 : .infinity) { one.mood = "idle"; one.line = "Quiet for a while" }
-    if let known = byId[one.id], known.updatedAt >= one.updatedAt {
+    // The hook says "done" when a turn ends, even while background work it
+    // started still runs; the conversation knows better.
+    let settled = one.mood == "done" || one.mood == "idle"
+    if let known = byId[one.id], known.updatedAt >= one.updatedAt || (known.background > 0 && settled) {
       if known.project == "this session", !one.project.isEmpty { byId[one.id]?.project = one.project }
       continue
     }
@@ -259,6 +263,16 @@ private struct FileState {
   var tool = ""
   var toolInput: [String: Any] = [:]
   var at: Double = 0              // when it happened, ms since 1970
+  /// Background commands, monitors and helpers still running, by task id,
+  /// with the time (ms since 1970) after which Pip stops believing in them.
+  var background: [String: (kind: String, what: String, since: Double, until: Double)] = [:]
+  /// What each recent tool call said it would do, by call id, so a task that
+  /// goes to the background keeps its description.
+  var calls: [String: String] = [:]
+
+  func running(_ now: Double) -> [(kind: String, what: String, since: Double, until: Double)] {
+    background.values.filter { $0.until > now }.sorted { $0.since < $1.since }
+  }
 }
 
 final class SessionScanner {
@@ -337,6 +351,8 @@ final class SessionScanner {
             chunk *= 4
             continue
           }
+          // Background tasks started before the last message may still run.
+          for entry in entries[..<last] { track(entry, &state) }
           entries = Array(entries[last...])
           for entry in entries { apply(entry, &state) }
           if state.prompt.isEmpty { state.prompt = noted }
@@ -400,6 +416,7 @@ final class SessionScanner {
   private func apply(_ entry: [String: Any], _ state: inout FileState) {
     let type = entry["type"] as? String ?? ""
     if let cwd = entry["cwd"] as? String { state.cwd = cwd }
+    track(entry, &state)
     switch type {
     case "last-prompt":
       if state.prompt.isEmpty, let p = entry["lastPrompt"] as? String { state.prompt = p }
@@ -450,6 +467,73 @@ final class SessionScanner {
     state.at = at
   }
 
+  /// Notes background work starting and ending. Claude reports a start in the
+  /// tool's result ("Command running in background with ID: …") and an end in
+  /// a <task-notification> that carries a <status>. Only text that begins with
+  /// these counts, so a conversation that merely quotes them changes nothing.
+  private func track(_ entry: [String: Any], _ state: inout FileState) {
+    let type = entry["type"] as? String ?? ""
+    guard entry["isSidechain"] as? Bool != true else { return }
+    let content = (entry["message"] as? [String: Any])?["content"]
+    if type == "assistant" {
+      // Remember what each call that may go to the background is for.
+      for block in content as? [[String: Any]] ?? [] where block["type"] as? String == "tool_use" {
+        guard let id = block["id"] as? String, let name = block["name"] as? String,
+          ["Bash", "Monitor", "Agent", "Task"].contains(name) else { continue }
+        let input = block["input"] as? [String: Any] ?? [:]
+        let said = (input["description"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if state.calls.count > 100 { state.calls.removeAll() }
+        state.calls[id] = !said.isEmpty ? said : name == "Bash" ? "running \(input["command"] as? String ?? "a command")" : ""
+      }
+      return
+    }
+    guard type == "user" || type == "queue-operation" else { return }
+    var notes: [String] = [], results: [(call: String, text: String)] = []
+    if let text = entry["content"] as? String { notes.append(text) }
+    if let text = content as? String { notes.append(text) }
+    for block in content as? [[String: Any]] ?? [] {
+      switch block["type"] as? String {
+      case "text": if let text = block["text"] as? String { notes.append(text) }
+      case "tool_result":
+        let call = block["tool_use_id"] as? String ?? ""
+        if let text = block["content"] as? String { results.append((call, text)) }
+        for part in block["content"] as? [[String: Any]] ?? [] { if let text = part["text"] as? String { results.append((call, text)) } }
+      default: break
+      }
+    }
+    let at = time(entry) ?? Date().timeIntervalSince1970 * 1000
+    let hours2 = 2 * 3600 * 1000.0
+    for (call, text) in results {
+      let what = state.calls.removeValue(forKey: call) ?? ""
+      if let id = word(after: "Command running in background with ID: ", in: text, atStart: true) {
+        state.background[id] = ("command", what, at, at + hours2)
+      } else if let id = word(after: "Monitor started (task ", in: text, atStart: true) {
+        let minutes = word(after: "expires in ", in: text, atStart: false).flatMap { Double($0.prefix { $0.isNumber }) }
+        state.background[id] = ("monitor", what, at, minutes.map { at + ($0 + 1) * 60 * 1000 } ?? at + hours2)
+      } else if text.hasPrefix("Async agent launched"), let id = word(after: "agentId: ", in: text, atStart: false) {
+        state.background[id] = ("helper", what, at, at + hours2)
+      } else if let id = word(after: "{\"message\":\"Successfully stopped task: ", in: text, atStart: true)
+        ?? word(after: "<tool_use_error>Task ", in: text, atStart: true)
+      {
+        state.background[id] = nil
+      }
+    }
+    for text in notes where text.hasPrefix("<task-notification>") {
+      for one in text.components(separatedBy: "<task-notification>") where one.contains("<status>") {
+        for piece in one.components(separatedBy: "<task-id>").dropFirst() {
+          if let end = piece.range(of: "</task-id>") { state.background[String(piece[..<end.lowerBound])] = nil }
+        }
+      }
+    }
+  }
+
+  /// The id-like word right after `prefix` in `text`.
+  private func word(after prefix: String, in text: String, atStart: Bool) -> String? {
+    guard let found = atStart ? (text.hasPrefix(prefix) ? text.range(of: prefix) : nil) : text.range(of: prefix) else { return nil }
+    let id = text[found.upperBound...].prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+    return id.isEmpty ? nil : String(id)
+  }
+
   /// What the session is doing now, from what last happened and how long ago.
   private func session(_ file: URL, _ state: FileState) -> ClaudeSession? {
     guard state.kind != "none" else { return nil }
@@ -478,11 +562,34 @@ final class SessionScanner {
     default:
       break
     }
+    // A reply that ends the turn while background work still runs: Claude
+    // isn't done, it is waiting for that work to report back.
+    let busy = state.running(Date().timeIntervalSince1970 * 1000)
+    if !busy.isEmpty, one.mood == "done" {
+      let helpers = busy.filter { $0.kind == "helper" }.count
+      one.mood = "working"
+      one.background = busy.count
+      one.activity = helpers == busy.count ? "helper" : "run"
+      // Say what each task is, in the words Claude gave it.
+      func named(_ task: (kind: String, what: String, since: Double, until: Double), _ room: Int) -> String {
+        let flat = task.what.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let what = flat.count > room ? String(flat.prefix(room - 1)) + "…" : flat
+        switch task.kind {
+        case "monitor": return what.isEmpty ? "watching for results" : "watching \(lowerFirst(what))"
+        case "helper": return what.isEmpty ? "a helper at work" : "helper: \(what)"
+        default: return what.isEmpty ? "a command" : what
+        }
+      }
+      let items = busy.prefix(3).map { named($0, busy.count > 1 ? 48 : 90) }
+      let more = busy.count > 3 ? " · and \(busy.count - 3) more" : ""
+      one.line = "In the background: " + items.joined(separator: " · ") + more
+      return one
+    }
     // Nothing new for a long while in the middle of a task: it ended without
     // a reply, or it is waiting on something Pip can't see.
     // A tool can run for a long time (a build, a helper agent), so a working
     // session stays working for an hour; a silent "thinking" one for 15 minutes.
-    if age > (one.mood == "working" ? 60 * 60 : one.mood == "thinking" ? 15 * 60 : .infinity) { (one.mood, one.activity, one.line) = ("idle", "", "Quiet for a while") }
+    if busy.isEmpty, age > (one.mood == "working" ? 60 * 60 : one.mood == "thinking" ? 15 * 60 : .infinity) { (one.mood, one.activity, one.line) = ("idle", "", "Quiet for a while") }
     return one
   }
 
@@ -567,4 +674,10 @@ func setHooksInstalled(_ on: Bool) -> String? {
   }
   if !on { try? FileManager.default.removeItem(at: sessionsFolder) }
   return nil
+}
+
+/// "Fork rerun" → "fork rerun", but leaves names such as "README" alone.
+func lowerFirst(_ s: String) -> String {
+  guard let first = s.first, first.isUppercase, !(s.dropFirst().first?.isUppercase ?? false) else { return s }
+  return first.lowercased() + s.dropFirst()
 }
