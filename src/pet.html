@@ -868,7 +868,20 @@ function report() {
 window.addEventListener('resize', report)
 
 // ---------- what the app calls ----------
+// A new status waits while the bubble's current line is still being read,
+// and then comes in whole, so Pip's face and its words change together
+// (no celebrating before "All done!" is up). "Needs you" and trouble don't wait.
+let waitingStatus = null, statusTimer = null
 function show(status) {
+  const urgent = status.mood === 'waiting' || status.mood === 'oops'
+  const wait = shownAt + holdFor - Date.now()
+  if (!urgent && !local && wait > 0 && (status.line || '') !== M.line) {
+    waitingStatus = status
+    clearTimeout(statusTimer)
+    statusTimer = setTimeout(() => { const next = waitingStatus; waitingStatus = null; statusTimer = null; if (next) show(next) }, wait + 30)
+    return
+  }
+  waitingStatus = null; clearTimeout(statusTimer); statusTimer = null
   const prev = M
   M = { mood: status.mood || 'done', activity: status.activity || '', line: status.line || '', from: status.from || '' }
   if (M.mood !== prev.mood) {
