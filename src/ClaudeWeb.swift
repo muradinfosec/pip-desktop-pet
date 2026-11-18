@@ -216,6 +216,8 @@ final class ClaudeWeb: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDel
           const open = (last.content || []).filter(b => !b.stop_timestamp).pop()
           const tool = tools.length ? tools[tools.length - 1].name || '' : ''
           chat.doing = chat.answering ? (open && open.type === 'tool_use' ? open.name || tool : open ? open.type : tool) : ''
+          const thought = chat.answering && open && open.type === 'thinking' && (open.thinking || '')
+          if (thought) chat.thought = thought.split(/\\n\\s*\\n/).filter(x => x.trim()).pop().slice(0, 600)
           if (!chat.answering) chat.settled = Math.max(chat.settled, Date.parse(last.updated_at) || created)
         }
       }
@@ -248,7 +250,8 @@ final class ClaudeWeb: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDel
         case doing.contains("research"), doing.contains("compass"):
           (one.activity, one.line) = ("web", "Researching")
         case doing == "thinking":
-          (one.activity, one.line) = ("", "Thinking it over…")
+          let thought = thoughtLine(chat["thought"] as? String ?? "")
+          (one.activity, one.line) = ("", thought.isEmpty ? "Thinking it over…" : "💭 " + thought)
           one.mood = "thinking"
         case doing.contains("artifact"), doing.contains("create_file"), doing.contains("str_replace"):
           (one.activity, one.line) = ("write", "Making an artifact")

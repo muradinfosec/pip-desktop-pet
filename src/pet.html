@@ -794,11 +794,24 @@ function frame(now) {
 }
 
 // ---------- the speech bubble ----------
-let bubbleText = ''
-function say(line, kind, from) {
+// Every line stays up long enough to read: at least 3.5 seconds, longer
+// for longer lines. A newer line waits its turn, and when the time is up the
+// newest one shows, so Pip never falls behind. Things you're doing with Pip
+// (talking, an answer, an approval, a pat) and "needs you" don't wait.
+let bubbleText = '', shownAt = 0, holdFor = 0, holdTimer = null
+const readTime = line => Math.min(7000, Math.max(3500, String(line).trim().split(/\s+/).length * 350))
+function say(line, kind, from, urgent) {
   const b = $('bubble')
   const key = (from ? from + '\u0001' : '') + line
   if (key !== bubbleText) {
+    const wait = shownAt + holdFor - Date.now()
+    if (!urgent && wait > 0) {
+      clearTimeout(holdTimer)
+      holdTimer = setTimeout(() => { holdTimer = null; redraw() }, wait + 30)
+      return
+    }
+    clearTimeout(holdTimer); holdTimer = null
+    shownAt = Date.now(); holdFor = urgent || !line ? 0 : readTime(line)
     bubbleText = key; b.textContent = ''; b.className = ''
     if (from) { const f = document.createElement('div'); f.className = 'from'; f.textContent = from; b.appendChild(f) }
     const body = document.createElement('div'); body.className = 'body'; body.textContent = line
@@ -811,6 +824,7 @@ function say(line, kind, from) {
 }
 function showApproval() {
   const b = $('bubble')
+  clearTimeout(holdTimer); holdTimer = null; holdFor = 0
   bubbleText = '\u0000approval:' + approval.id
   b.textContent = ''
   b.className = 'ask'
@@ -834,10 +848,10 @@ function decide(yes) {
 }
 function redraw() {
   if (approval && !isHeld && local !== 'listening') return showApproval()
-  if (t < patUntil) return say('Hehe, that tickles!', '')
-  if (isHeld) return say('Whoa! Where are we going?', '')
-  if (local) return say(localLine, localKind)
-  say(M.line || '', M.mood === 'sleeping' ? 'quiet' : '', M.from)
+  if (t < patUntil) return say('Hehe, that tickles!', '', '', true)
+  if (isHeld) return say('Whoa! Where are we going?', '', '', true)
+  if (local) return say(localLine, localKind, '', !['doing', 'note'].includes(local))
+  say(M.line || '', M.mood === 'sleeping' ? 'quiet' : '', M.from, M.mood === 'waiting' || M.mood === 'oops')
 }
 // Tells the app where Pip and the bubble are, so clicks anywhere else pass
 // through to the windows underneath.
@@ -888,7 +902,16 @@ function asking(text) { local = 'asking'; localLine = '“' + text + '” Hmm…
 function settle(line) {
   approval = null
   local = null
-  if (line) { local = 'note'; localLine = line; localKind = ''; redraw(); setTimeout(() => { if (local === 'note') { local = null; redraw() } }, 2800) }
+  if (line) {
+    local = 'note'; localLine = line; localKind = ''; redraw()
+    // Counted from when the note actually shows, which can be after the line before it.
+    const mine = line
+    setTimeout(function done() {
+      if (local !== 'note' || localLine !== mine) return
+      if (bubbleText !== mine || Date.now() - shownAt < Math.max(5000, readTime(mine))) return setTimeout(done, 500)
+      local = null; redraw()
+    }, 1000)
+  }
   else redraw()
 }
 // An answer stays up long enough to read: about 150 words a minute, at

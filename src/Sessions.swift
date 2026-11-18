@@ -266,6 +266,7 @@ private struct FileState {
   var tool = ""
   var toolInput: [String: Any] = [:]
   var at: Double = 0              // when it happened, ms since 1970
+  var thought = ""                // what Claude last thought, when the file holds it
   /// Background commands, monitors and helpers still running, by task id,
   /// with the time (ms since 1970) after which Pip stops believing in them.
   var background: [String: (kind: String, what: String, since: Double, until: Double)] = [:]
@@ -467,8 +468,9 @@ final class SessionScanner {
         state.toolInput = use["input"] as? [String: Any] ?? [:]
       } else if blocks.contains(where: { $0["type"] as? String == "text" }) {
         state.kind = "text"
-      } else if blocks.contains(where: { $0["type"] as? String == "thinking" }) {
+      } else if let block = blocks.last(where: { $0["type"] as? String == "thinking" }) {
         state.kind = "thinking"
+        state.thought = thoughtLine(block["thinking"] as? String ?? "")
       } else {
         return
       }
@@ -556,8 +558,12 @@ final class SessionScanner {
     one.prompt = flat.count > 120 ? String(flat.prefix(119)) + "…" : flat
     let age = one.ageSeconds
     switch state.kind {
-    case "prompt", "tool-result", "thinking":
+    case "prompt", "tool-result":
       (one.mood, one.line) = ("thinking", "Thinking…")
+    case "thinking":
+      // Claude's own thinking, when the conversation holds it (it can also
+      // be kept private, and then Pip just says it's thinking).
+      (one.mood, one.line) = ("thinking", state.thought.isEmpty ? "Thinking…" : "💭 " + state.thought)
     case "tool":
       let said = describeTool(state.tool, state.toolInput)
       (one.mood, one.activity, one.line) = (said.mood, said.activity, said.line)
@@ -689,4 +695,24 @@ func setHooksInstalled(_ on: Bool) -> String? {
 func lowerFirst(_ s: String) -> String {
   guard let first = s.first, first.isUppercase, !(s.dropFirst().first?.isUppercase ?? false) else { return s }
   return first.lowercased() + s.dropFirst()
+}
+
+/// Claude's thinking, made fit for the bubble: one paragraph, no markdown,
+/// cut at a sentence end near 240 characters.
+func thoughtLine(_ raw: String) -> String {
+  var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+  // A bold heading on its own line becomes "Heading: …".
+  if text.hasPrefix("**"), let end = text.range(of: "**", range: text.index(text.startIndex, offsetBy: 2)..<text.endIndex),
+    text[end.upperBound...].first?.isNewline == true
+  {
+    text = text[text.index(text.startIndex, offsetBy: 2)..<end.lowerBound] + ": " + text[end.upperBound...]
+  }
+  text = text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+  text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+  guard text.count > 240 else { return text }
+  let head = String(text.prefix(240))
+  if let end = head.lastIndex(where: { ".!?".contains($0) }), head.distance(from: head.startIndex, to: end) > 80 {
+    return String(head[...end])
+  }
+  return String(head.prefix(239)) + "…"
 }
