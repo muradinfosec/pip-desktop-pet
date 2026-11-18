@@ -38,7 +38,7 @@ cat > "$work/Pip.app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-swiftc -O "$here/main.swift" "$here/Agent.swift" "$here/Sessions.swift" -o "$work/Pip.app/Contents/MacOS/Pip" \
+swiftc -O "$here/main.swift" "$here/Agent.swift" "$here/Sessions.swift" "$here/ClaudeWeb.swift" -o "$work/Pip.app/Contents/MacOS/Pip" \
   -framework Cocoa -framework WebKit -framework Speech -framework AVFoundation -framework Carbon -framework ServiceManagement
 mkdir -p "$work/Pip.app/Contents/Resources"
 cp "$here/pet.html" "$work/Pip.app/Contents/Resources/pet.html"

@@ -393,6 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
   func poll() {
     guard isLoaded else { return }
+    ClaudeWeb.shared.tick()
     sessions = readSessions()
     if isDebug {
       let seen = sessions.map { "\($0.label)=\($0.mood):\($0.line)" }.joined(separator: " | ")
@@ -560,6 +561,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     dictation.submenu = options
     menu.addItem(dictation)
     add("Watch All Claude Sessions", #selector(toggleWatchSessions), on: areHooksInstalled())
+    let chatsOn = UserDefaults.standard.bool(forKey: "watchChats")
+    add(chatsOn && ClaudeWeb.shared.state == .signedOut ? "Watch Claude App Chats (sign in…)" : "Watch Claude App Chats",
+      #selector(toggleWatchChats), on: chatsOn)
     let live = sessions
     if !live.isEmpty {
       let busy = live.filter { $0.urgency >= 2 }.count
@@ -601,6 +605,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     guard let raw = sender.representedObject as? String, let level = ComputerAccess(rawValue: raw) else { return }
     ComputerAccess.current = level
     js("settle(\(quoted("Okay: \(level.title.lowercased()).")))")
+  }
+
+  /// Chats live on claude.ai, so Pip asks claude.ai about them, signed in
+  /// through its own small window (ClaudeWeb.swift).
+  @objc func toggleWatchChats() {
+    let on = UserDefaults.standard.bool(forKey: "watchChats")
+    if on, ClaudeWeb.shared.state != .signedOut {
+      UserDefaults.standard.set(false, forKey: "watchChats")
+      return
+    }
+    UserDefaults.standard.set(true, forKey: "watchChats")
+    if ClaudeWeb.shared.state != .signedIn {
+      ClaudeWeb.shared.showSignIn()
+      js("settle(\(quoted("Sign in to Claude in the window I opened, and I'll keep an eye on your chats.")))")
+    }
   }
 
   @objc func toggleWatchSessions() {

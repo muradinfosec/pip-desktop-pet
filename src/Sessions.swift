@@ -86,7 +86,8 @@ func runHook() -> Never {
     record["mood"] = "idle"; record["activity"] = ""; record["line"] = "Ready"
   case "UserPromptSubmit":
     record["mood"] = "thinking"; record["activity"] = ""; record["line"] = "Thinking…"
-    if let prompt = event["prompt"] as? String {
+    // A background-task notice arrives as a prompt too; it isn't what you asked.
+    if let prompt = event["prompt"] as? String, !prompt.hasPrefix("<"), !prompt.hasPrefix("[SYSTEM NOTIFICATION") {
       let one = prompt.split(whereSeparator: \.isWhitespace).joined(separator: " ")
       record["prompt"] = one.count > 120 ? String(one.prefix(119)) + "…" : one
     }
@@ -183,6 +184,8 @@ func session(from record: [String: Any]) -> ClaudeSession? {
 func readSessions() -> [ClaudeSession] {
   var byId: [String: ClaudeSession] = [:]
   for one in sessionScanner.scan() { byId[one.id] = one }
+  // Chats in the Claude app, asked of claude.ai (ClaudeWeb.swift).
+  for one in ClaudeWeb.shared.sessions() { byId[one.id] = one }
   let titles = sessionScanner.titles
   let files = (try? FileManager.default.contentsOfDirectory(at: sessionsFolder, includingPropertiesForKeys: nil)) ?? []
   var records: [[String: Any]] = files.filter { $0.pathExtension == "json" }.compactMap {
@@ -387,9 +390,15 @@ final class SessionScanner {
   /// What the person typed in a message: its first text that isn't a note the
   /// app added around it (those start with a tag such as <system-reminder>).
   private func typedText(_ content: Any?) -> String {
-    if let text = content as? String { return text.hasPrefix("<") ? "" : text }
+    // Notes the app adds (<system-reminder>, <task-notification>, system
+    // notices) aren't what the person typed.
+    func typed(_ text: String) -> Bool {
+      let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      return !t.isEmpty && !t.hasPrefix("<") && !t.hasPrefix("[SYSTEM NOTIFICATION")
+    }
+    if let text = content as? String { return typed(text) ? text : "" }
     let texts = (content as? [[String: Any]] ?? []).compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
-    return texts.first { !$0.hasPrefix("<") && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+    return texts.first(where: typed) ?? ""
   }
 
   private func isMessage(_ entry: [String: Any]) -> Bool {

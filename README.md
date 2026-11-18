@@ -17,7 +17,7 @@ Pip isn't a drawing: it's a small 3D creature rendered live on your Mac, with fu
 - **Notices you.** Its eyes follow your pointer, and hovering makes it blush. Click to pat it (three quick pats make it hop); drag it and it dangles, then lands with a puff of dust.
 - **Talks.** Press **⌃⌥P** (Control-Option-P) anywhere and speak. Pip listens, then answers in its speech bubble and out loud in a small, high pet voice.
 - **Does things for you.** Pip can read files, run commands and use your connected services, like Jira, Confluence or email. It always asks first before running a command, changing a file or sending anything.
-- **Watches your Claude Code sessions.** Pip sees every Claude Code session on your Mac, shows the busy one, and can tell you what any of them is doing.
+- **Watches your Claude Code sessions and chats.** Pip sees every Claude Code session on your Mac and, if you sign it in, your Claude app chats too. It shows the busy one and can tell you what any of them is doing.
 
 ## Install
 
@@ -68,7 +68,7 @@ Connectors are the ones on your claude.ai account. A connector that shows as nee
 Pip watches every Claude Code session on your Mac, in the terminal and in the Claude desktop app, all the time and with no setup. It follows each session's conversation in `~/.claude/projects/` as it's written and uses the desktop app's session titles. Pip then:
 
 - shows the busiest session, with its name in the bubble when several are working,
-- tells you when another session finishes or needs you,
+- tells you when another session finishes or needs you, including background commands and helpers it's still waiting on,
 - lists every session from the last 12 hours, and what each is doing, in the menu,
 - can read a session's history when you ask what it's doing.
 
@@ -86,7 +86,13 @@ To see what Pip sees, run:
 ~/Applications/Pip.app/Contents/MacOS/Pip --list-sessions
 ```
 
-Regular claude.ai chats are stored on Claude's servers, not on your Mac, so Pip can't see them.
+## Watching your Claude app chats
+
+Chats in the Claude app's Chat tab answer on claude.ai and leave nothing on your Mac, so Pip asks claude.ai about them. Turn on **Watch Claude App Chats** in Pip's menu and sign in to Claude in the small window Pip opens, the same way you would in a browser. You only do this once.
+
+Pip then checks your recent chats every few seconds, whatever the Claude app is showing, and treats them like sessions: it shows a chat while Claude is answering (searching the web, researching, thinking or writing), tells you when it finishes, and lists it in the menu next to your Claude Code sessions.
+
+Your sign-in stays in Pip's own web storage, like a browser's. Pip's code never reads or copies it, and Pip talks only to claude.ai. claude.ai doesn't document the way Pip asks about chats, so a change on its side can break this until Pip is updated. Turn the switch off to stop.
 
 ## Using Pip
 
@@ -99,8 +105,8 @@ Regular claude.ai chats are stored on Claude's servers, not on your Mac, so Pip 
   - Move Pip to the corner, for when it's lost off-screen
   - Talk to Pip and Pat Pip
   - Speak Answers, Pet Voice and Open at Login switches
-  - Computer Access, Dictation and Watch All Claude Sessions
-  - Your Claude Code sessions and what each is doing
+  - Computer Access, Dictation, Watch All Claude Sessions and Watch Claude App Chats
+  - Your Claude Code sessions and chats, and what each is doing
   - Quit Pip
 
 ## Telling Pip what you're doing (optional)
@@ -128,6 +134,12 @@ If you turned on **Watch All Claude Sessions**, turn it off first. Then right-cl
 
 ```bash
 rm -rf ~/Applications/Pip.app ~/.claude/pip-pet
+```
+
+If you signed Pip in to Claude for chats, this also removes that sign-in:
+
+```bash
+rm -rf ~/Library/WebKit/local.pip-pet.desktop ~/Library/Caches/local.pip-pet.desktop
 ```
 
 If Pip is still listed in System Settings → General → Login Items, remove it there.
