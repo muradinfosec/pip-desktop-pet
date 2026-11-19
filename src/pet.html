@@ -795,11 +795,11 @@ function frame(now) {
 
 // ---------- the speech bubble ----------
 // Every line stays up long enough to read: at least 3.5 seconds, longer
-// for longer lines. A newer line waits its turn, and when the time is up the
+// for longer lines (up to 10). A newer line waits its turn, and when the time is up the
 // newest one shows, so Pip never falls behind. Things you're doing with Pip
 // (talking, an answer, an approval, a pat) and "needs you" don't wait.
 let bubbleText = '', shownAt = 0, holdFor = 0, holdTimer = null
-const readTime = line => Math.min(7000, Math.max(3500, String(line).trim().split(/\s+/).length * 350))
+const readTime = line => Math.min(10000, Math.max(3500, String(line).trim().split(/\s+/).length * 300))
 function say(line, kind, from, urgent) {
   const b = $('bubble')
   const key = (from ? from + '\u0001' : '') + line

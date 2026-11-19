@@ -698,7 +698,8 @@ func lowerFirst(_ s: String) -> String {
 }
 
 /// Claude's thinking, made fit for the bubble: one paragraph, no markdown,
-/// cut at a sentence end near 240 characters.
+/// whole up to about 600 characters (the bubble grows, then scrolls), and
+/// past that cut at a sentence end.
 func thoughtLine(_ raw: String) -> String {
   var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
   // A bold heading on its own line becomes "Heading: …".
@@ -709,10 +710,10 @@ func thoughtLine(_ raw: String) -> String {
   }
   text = text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
   text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-  guard text.count > 240 else { return text }
-  let head = String(text.prefix(240))
-  if let end = head.lastIndex(where: { ".!?".contains($0) }), head.distance(from: head.startIndex, to: end) > 80 {
+  guard text.count > 600 else { return text }
+  let head = String(text.prefix(600))
+  if let end = head.lastIndex(where: { ".!?".contains($0) }), head.distance(from: head.startIndex, to: end) > 300 {
     return String(head[...end])
   }
-  return String(head.prefix(239)) + "…"
+  return String(head.prefix(599)) + "…"
 }
